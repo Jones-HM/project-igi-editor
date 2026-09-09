@@ -37,6 +37,8 @@ int CountChromaticRenderedPixels(const VisualIntegrityView& view, int part_id, i
     return chromatic;
 }
 
+constexpr float kMateriallyColorfulTextureRatio = 0.20f;
+
 bool HasFiniteDepth(const VisualIntegrityView& view) {
     return std::all_of(view.sceneDepth.begin(), view.sceneDepth.end(), [](float value) {
         return std::isfinite(value);
@@ -437,7 +439,10 @@ VisualIntegrityResult EvaluateVisualIntegrity(const VisualIntegrityInput& input)
     // diffuse binding. Only textures proven to contain substantial colour are
     // assessed, so deliberately neutral materials remain outside this rule.
     for (const VisualIntegrityPart& part : input.expectedParts) {
-        if (part.textureChromaticPixelRatio < 0.10f) continue;
+        // Packed/paletted grayscale textures can report a small amount of
+        // channel divergence from format quantization. Require substantial
+        // source chroma before treating grayscale output as a texture fault.
+        if (part.textureChromaticPixelRatio < kMateriallyColorfulTextureRatio) continue;
         int samples = 0;
         int chromatic = 0;
         for (const VisualIntegrityView& view : input.views) {

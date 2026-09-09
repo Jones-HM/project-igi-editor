@@ -126,6 +126,26 @@ TEST(VisualIntegrityTest, FailsWhenColorfulAuthoredMaterialRendersOnlyGrayscale)
     EXPECT_TRUE(HasRule(result, "texture-appearance"));
 }
 
+TEST(VisualIntegrityTest, DoesNotRejectNeutralTextureWithFormatChromaNoise) {
+    auto view = MakeView(std::vector<int>(16, 1));
+    view.renderedRgb.assign(16 * 3, 128);
+    igi::VisualIntegrityPart part;
+    part.id = 1;
+    part.vertexCount = 3;
+    part.triangleCount = 1;
+    part.textureIdentity = "004_13_1";
+    // The real grayscale 004_13_1 texture reports this small ratio because
+    // packed/paletted channel quantization creates apparent chroma noise.
+    part.textureChromaticPixelRatio = 0.161255f;
+    auto input = MakeInput({1}, {view});
+    input.expectedParts = {part};
+
+    const auto result = igi::EvaluateVisualIntegrity(input);
+
+    EXPECT_EQ(result.status, igi::VisualIntegrityStatus::kPass);
+    EXPECT_FALSE(HasRule(result, "texture-appearance"));
+}
+
 TEST(VisualIntegrityTest, DoesNotRejectSkinnedFrameFromStaticDiagnosticProjection) {
     // The visible renderer may deform an AI mesh, while the diagnostic pass
     // has only its rest-pose projection. Those two projections cannot be
