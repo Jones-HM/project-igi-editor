@@ -7,21 +7,32 @@ test alone.
 
 ## IGIED-FOREIGN-MODEL-TEXTURES-001
 
-Status: implementation fixed; final release gate pending.
+Status: fixed and verified (import path). Release binary deployed to `D:\IGI1`.
 
 ### Symptom
 
 Importing a model from another level could bind same-named textures from the
 destination or an unrelated level. Character parts could therefore receive the
-wrong appearance, and an import could report success without a complete
-model/DAT/MTP publication.
+wrong appearance (notably Sniper `001_02_1`), and an import could report
+success without a complete model/DAT/MTP publication.
 
 ### Root cause
 
 Model IDs and texture IDs are not globally unique asset identities. The old
 resolver used loose fallbacks and destination state, so it could select the
-wrong level-local mesh or texture bundle. Existing RES entries also were not
-replaced when their bytes differed.
+wrong level-local mesh or texture bundle. Two concrete defects:
+
+1. The `001_02_1` forensics: level `.res` archives are polluted with
+   same-name entries from other levels, while the authoritative bytes live in
+   the shared `common` archive (`missions/location0/common/.../location0.res`).
+   `FindTextureDataFromLevel` / `FindMeshDataFromLevel` searched only the level
+   archive, so a lookup for a texture that exists only in `common` missed its
+   own source level and fell through to same-name bytes from an unrelated
+   level's archive.
+2. Session staleness: after publishing an import, `texture_sources_` still held
+   the stale pre-import mapping, so a later import in the same session resolved
+   the model to the wrong level's archive. Existing RES entries also were not
+   replaced when their bytes differed.
 
 ### Resolution
 
@@ -38,23 +49,42 @@ replaced when their bytes differed.
 - Resolve cross-family ATTA dependencies recursively before publication.
 - Make the E2E harness fail on an unobserved or nonzero importer exit and enforce
   the required 30 MB process-memory gate.
+- Include the shared `common` archive in the source bundle: `FindTextureDataFromLevel`
+  / `FindMeshDataFromLevel` now resolve `levelN.res` first, then
+  `common/.../location0.res`, via the shared `FindModelSourceEntry` helper
+  (level wins on name collisions; format-suffix fallback stays per-archive).
+- Upsert `texture_sources_` (plus `texture_level_map_` and texture-cache
+  invalidation) immediately after publishing, so later imports in the same
+  session resolve the just-published destination bundle.
+- Dedupe the model picker to one row per model ID (current level wins,
+  otherwise smallest owning level), with direct Up/Down navigation and Enter
+  committing the highlighted row's deterministic source level.
 
 ### Verification
 
-- `igi_tests`: 5/5 `ModelTextureResolution.*` tests passed.
+- `igi_tests`: 13/13 `ModelTextureResolution.*` tests passed, including the two
+  synthetic-`.res` integration tests (`LevelMissingFallsBackToCommonArchive`,
+  `LevelArchiveWinsOverCommonArchive`) and the picker tests (dedupe,
+  nav-preview, enter-commit, click).
 - Release x86 build of `igi_tests` and `igi1ed.exe` passed.
-- Disposable WMI Session 1 explicit-source import passed with matching model
-  bytes, texture bytes, and ordered DAT mapping; the installed `D:\IGI1`
-  corpus was not modified.
-- Disposable automatic-source negative control rejected divergent bundles and
-  made no destination mutation.
+- Disposable-copy explicit-source import of Sniper `001_02_1` (source level 2)
+  passed into every destination level 1–5: matching model bytes, 13/13 matching
+  texture bytes, and ordered DAT mapping equality per level
+  (`D:\e2e-ai-swap-L1..L5-artifacts\report.json`, all `status=PASS`, exit 0).
+- Disposable fresh-import control (`006_01_1`, level2-only → level1) passed with
+  `destinationFilesChanged: [level1.dat, level1.mtp, models-level1.res,
+  textures-level1.res]`.
+- Disposable automatic-source negative control correctly rejected the divergent
+  `001_02_1` bundle as ambiguous with no destination mutation; the installed
+  `D:\IGI1` corpus was not modified during E2E.
 
 ### Release gate still required
 
-The observed CLI importer process was only 3.6 MB, below the required 30 MB
-runtime gate. The full test executable also reported 39 existing corpus/path
-and verify-level integration failures. Do not publish a release until those
-two gates are re-run and resolved or explicitly waived by the maintainer.
+The full test executable reports pre-existing corpus-gated failures
+(`DatParser/GraphParser/ResParser/TexParser FileExists*` — the checkout lacks
+the installed mission corpus under `bin\Release\missions`), unrelated to this
+change. The live picker scenario harness separately needs a UI-targeting fix
+(it applied `463_03_1` instead of the filtered `003_02_1`).
 
 ## Safe future fix and release procedure
 
