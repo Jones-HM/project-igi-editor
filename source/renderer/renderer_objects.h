@@ -5,6 +5,7 @@
 #include "../level/level_objects.h"
 #include "dat_writer.h"
 #include "res_writer.h"
+#include "model_texture_resolution.h"
 #include <map>
 #include <string>
 #include <vector>
@@ -58,7 +59,12 @@ public:
     // so a model that renders in-editor but is absent from the packed archive becomes
     // visible in-game. Returns true on success (or if already present). (issue 2)
     bool AddModelToLevelRes(const std::string& modelId,
-                            const std::function<void(size_t,size_t)>& onProgress = nullptr);
+                            const std::function<void(size_t,size_t)>& onProgress = nullptr,
+                            int sourceLevel = 0);
+    const std::vector<ModelTextureSource>& GetModelTextureSources() const {
+        EnsureGlobalTextureMapLoaded();
+        return texture_sources_;
+    }
     bool UpdateAttaLocalPosInMef(const std::string& parentModelId, bool isBuilding, int recordIndex, const glm::vec3& newLocalPos, const glm::mat3& newLocalRot);
     // Stable key "model@roundedWorldPos" used to match an ATTA against an EditRigidObj.
     static std::string AttaOccupancyKey(const std::string& modelId, const glm::vec3& worldPos);
@@ -83,7 +89,13 @@ public:
     // Find texture/mesh bytes from the in-memory .res index.
     // Returns empty vector if not found (callers fall back to on-disk paths).
     std::vector<uint8_t> FindTextureData(const std::string& textureId) const;
+    // Resolve texture bytes from one explicit level archive, preserving source
+    // provenance when a foreign destination contains the same texture name.
+    std::vector<uint8_t> FindTextureDataFromLevel(const std::string& textureId,
+                                                  int levelNo) const;
     std::vector<uint8_t> FindMeshData(const std::string& modelId) const;
+    std::vector<uint8_t> FindMeshDataFromLevel(const std::string& modelId,
+                                               int levelNo) const;
 
     // Pre-fill the attachment cache from already-parsed geometry (avoids re-reading
     // MEF bytes that were already loaded for mesh creation in GetOrLoadMesh).
@@ -291,6 +303,7 @@ private:
     std::map<std::string, std::vector<std::string>> model_texture_map_cache_;
     mutable std::map<std::string, std::vector<std::string>> global_texture_map_;
     mutable bool global_texture_map_loaded_ = false;
+    mutable std::vector<ModelTextureSource> texture_sources_;
     mutable std::map<std::string, int> model_level_map_;
     mutable std::map<std::string, int> texture_level_map_;
     std::map<std::string, std::vector<AttachInfo>> attachment_cache_;
@@ -382,12 +395,14 @@ private:
     void AddCharacterVertices(std::vector<float>& vertices, char c, float x, float y, float scale);
     std::string FindModelFile(const std::string& modelId, bool isBuilding);
     std::string FindTextureFile(const std::string& textureId) const;
+    std::string FindTextureFileInLevel(const std::string& textureId, int levelNo) const;
     std::string GetLevelTexturesPath() const;
     std::string GetLevelTextureDatPath() const;
     void LoadDatIntoMap(const std::string& datPath, std::map<std::string, std::vector<std::string>>& outMap);
     void EnsureTextureMapLoaded();
     void EnsureGlobalTextureMapLoaded() const;
     std::vector<std::string> GetTextureIdsForModel(const std::string& modelId);
+    std::vector<std::string> GetTextureIdsForSourceModel(const std::string& modelId, int sourceLevel);
     GLuint GetOrLoadTexture(const std::string& textureId);
     void ApplyTexturesToMesh(Mesh& mesh, const std::string& modelId, const std::string& parentModelId = "");
     void InitSelectionBox();

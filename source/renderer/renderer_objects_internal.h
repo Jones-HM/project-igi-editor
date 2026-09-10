@@ -21,6 +21,7 @@
 #include "../level/level_common.h"
 #include "gl_helper.h"
 #include "mef_native.h"
+#include "model_texture_resolution.h"
 #include "../level/qvm_parser.h"
 #include "../level/qvm_decompiler.h"
 #include "dat_writer.h"

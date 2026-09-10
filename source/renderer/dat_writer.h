@@ -65,6 +65,11 @@ bool DAT_WriteNative(const DATFile& dat, const std::string& outPath, std::string
 void DAT_AddModel(DATFile& dat, const std::string& modelName,
                   const std::vector<std::string>& textureNames, bool& alreadyPresent);
 
+// Upsert one model mapping while preserving the existing model order. Returns
+// true when the mapping or texture manifest changed.
+bool DAT_UpsertModel(DATFile& dat, const std::string& modelName,
+                     const std::vector<std::string>& textureNames);
+
 // Format the parsed DAT as a JSON string.
 // If modelFilter is non-empty, only entries whose modelName contains it are included.
 std::string DAT_FormatJSON(const DATFile& dat, const std::string& modelFilter = "");

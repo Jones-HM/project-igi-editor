@@ -439,20 +439,45 @@ std::vector<uint8_t> Renderer_Objects::FindTextureData(const std::string& textur
     };
     auto bytes = tryId(textureId);
     if (!bytes.empty()) return bytes;
-    // Try stripped name (remove _argb8888 etc.) as fallback
-    const std::string& id = textureId;
-    size_t us = id.rfind('_');
-    if (us != std::string::npos && us > 0) {
-        // Only strip if the suffix looks like a format tag (all lower alpha/digits)
-        bool isFormat = true;
-        for (size_t i = us + 1; i < id.size(); ++i) {
-            if (!std::islower((unsigned char)id[i]) && !std::isdigit((unsigned char)id[i])) {
-                isFormat = false; break;
-            }
-        }
-        if (isFormat) bytes = tryId(id.substr(0, us));
-    }
+    // Try only recognized pixel-format tags. Numeric suffixes such as _1 are
+    // part of the texture identity and must not be collapsed.
+    const std::string strippedId = StripTextureFormatSuffix(textureId);
+    if (strippedId != textureId) bytes = tryId(strippedId);
     return bytes;
+}
+
+std::vector<uint8_t> Renderer_Objects::FindTextureDataFromLevel(
+    const std::string& textureId, int levelNo) const {
+    const std::string levelRes = Utils::GetIGIRootPath() +
+        "\\missions\\location0\\level" + std::to_string(levelNo) +
+        "\\textures\\level" + std::to_string(levelNo) + ".res";
+    auto equalsCI = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                std::tolower(static_cast<unsigned char>(b[i]))) return false;
+        }
+        return true;
+    };
+    auto readFromIndex = [&](const ResIndex& index, const std::string& id) -> std::vector<uint8_t> {
+        const std::string entryName = id + ".tex";
+        for (const auto& item : index.index) {
+            if (equalsCI(item.first, entryName))
+                return RES_ReadEntry(index.res_path, item.second);
+        }
+        return {};
+    };
+    for (const auto& index : res_tex_indexes_) {
+        if (!equalsCI(index.res_path, levelRes)) continue;
+        auto bytes = readFromIndex(index, textureId);
+        if (!bytes.empty()) return bytes;
+        const std::string stripped = StripTextureFormatSuffix(textureId);
+        if (stripped != textureId) {
+            bytes = readFromIndex(index, stripped);
+            if (!bytes.empty()) return bytes;
+        }
+    }
+    return {};
 }
 
 // Try to find mesh bytes in the in-memory .res index.
@@ -462,6 +487,30 @@ std::vector<uint8_t> Renderer_Objects::FindMeshData(const std::string& modelId) 
         auto it = ri.index.find(fname);
         if (it != ri.index.end())
             return RES_ReadEntry(ri.res_path, it->second);
+    }
+    return {};
+}
+
+std::vector<uint8_t> Renderer_Objects::FindMeshDataFromLevel(
+    const std::string& modelId, int levelNo) const {
+    const std::string levelRes = Utils::GetIGIRootPath() +
+        "\\missions\\location0\\level" + std::to_string(levelNo) +
+        "\\models\\level" + std::to_string(levelNo) + ".res";
+    const std::string fname = modelId + ".mef";
+    auto equalsCI = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                std::tolower(static_cast<unsigned char>(b[i]))) return false;
+        }
+        return true;
+    };
+    for (const auto& index : res_model_indexes_) {
+        if (!equalsCI(index.res_path, levelRes)) continue;
+        for (const auto& item : index.index) {
+            if (equalsCI(item.first, fname))
+                return RES_ReadEntry(index.res_path, item.second);
+        }
     }
     return {};
 }

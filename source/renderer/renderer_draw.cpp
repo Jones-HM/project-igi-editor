@@ -2981,20 +2981,20 @@ void Renderer::Draw(const draw_params_s &params,
     }
 
     // ── Model ID picker (right panel, Ctrl+O) ───────────────────────────────
-    if (task_tree_view.model_picker_open_ && task_tree_view.model_ids_) {
+    if (task_tree_view.model_picker_open_ && task_tree_view.model_entries_) {
       int vw = params.view_define_->viewport_width_;
       int vh = params.view_define_->viewport_height_;
       const int pw = 280, px = vw - pw;
       // Build filtered sorted list
-      std::vector<std::string> filtered;
+      std::vector<ModelPickerEntry> filtered;
       std::string fl = task_tree_view.model_picker_filter_;
       std::transform(fl.begin(), fl.end(), fl.begin(), [](unsigned char c){ return std::tolower(c); });
-      for (const auto& id : *task_tree_view.model_ids_) {
-        if (fl.empty()) { filtered.push_back(id); }
+      for (const auto& entry : *task_tree_view.model_entries_) {
+        if (fl.empty()) { filtered.push_back(entry); }
         else {
-          std::string idl = id;
+          std::string idl = entry.label;
           std::transform(idl.begin(), idl.end(), idl.begin(), [](unsigned char c){ return std::tolower(c); });
-          if (idl.find(fl) != std::string::npos) filtered.push_back(id);
+          if (idl.find(fl) != std::string::npos) filtered.push_back(entry);
         }
       }
       int count = (int)filtered.size();
@@ -3015,7 +3015,7 @@ void Renderer::Draw(const draw_params_s &params,
             static auto t0 = std::chrono::steady_clock::now();
             float t = std::chrono::duration<float>(
                           std::chrono::steady_clock::now() - t0).count();
-            objects_.DrawModelPreview(filtered[sel0], ubo_mats_, vpX, vpY, s, s,
+            objects_.DrawModelPreview(filtered[sel0].modelId, ubo_mats_, vpX, vpY, s, s,
                                       t * 0.40f, t * 0.65f); // slow dual-axis spin
             // Restore the EXACT 2D HUD baseline (see the state set before the overlay
             // block). Critically, GL_TEXTURE_2D must be DISABLED with no texture bound,
@@ -3077,9 +3077,9 @@ void Renderer::Draw(const draw_params_s &params,
           int gy1 = vh - item_sy - row_h, gy2 = vh - item_sy;
           glVertex2i(px,gy1); glVertex2i(px+pw,gy1); glVertex2i(px+pw,gy2); glVertex2i(px,gy2);
           glEnd(); glDisable(GL_BLEND);
-          draw_text(px + 4, item_sy + 13, filtered[idx].c_str(), 1.0f, 0.9f, 0.1f);
+          draw_text(px + 4, item_sy + 13, filtered[idx].label.c_str(), 1.0f, 0.9f, 0.1f);
         } else {
-          draw_text(px + 4, item_sy + 13, filtered[idx].c_str(), 1.0f, 1.0f, 1.0f);
+          draw_text(px + 4, item_sy + 13, filtered[idx].label.c_str(), 1.0f, 1.0f, 1.0f);
         }
       }
       draw_text(px + 4, vh - ftr_h + 4, "[Enter] Insert  [Esc] Cancel  [Type] Filter", 0.5f, 0.5f, 0.5f);

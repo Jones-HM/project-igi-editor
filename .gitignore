@@ -35,6 +35,8 @@
 *.conf
 *.ps1
 !tools/e2e/Test-SmartCaptureArtifact.ps1
+!tools/e2e/Test-Level12CableTransition.ps1
+!tools/e2e/Test-ForeignModelTextures.ps1
 *.zip
 *.rc
 !assets/igi-editor.rc

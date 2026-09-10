@@ -531,7 +531,7 @@ public:
 		int  model_picker_selected_ = 0;
 		int  model_picker_scroll_   = 0;
 		std::string model_picker_filter_;
-		const std::set<std::string>* model_ids_ = nullptr;  // all XXX_XX_X model IDs from level objects
+		const std::vector<ModelPickerEntry>* model_entries_ = nullptr;
 
 		// AI Script editor state
 		std::string ai_script_path_;
@@ -702,6 +702,7 @@ public:
         objects_.DrawAttachedMesh(modelId, isBuilding, worldMat, ubo_mats_);
     }
     void                    SetSplineTerrainQuery(std::function<bool(double, double, float&)> fn) { splines_.SetTerrainQuery(std::move(fn)); }
+    void                    RequestSplineTrace(std::string path) { splines_.RequestTrace(std::move(path)); }
 	glm::vec3				GetMeshExtents(const std::string& modelId, bool isBuilding) { return objects_.GetMeshExtents(modelId, isBuilding); }
 	float					GetMeshRadius(const std::string& modelId, bool isBuilding) { return objects_.GetMeshRadius(modelId, isBuilding); }
 	glm::vec3				GetMeshCenter(const std::string& modelId, bool isBuilding) { return objects_.GetMeshCenter(modelId, isBuilding); }
@@ -788,8 +789,12 @@ public:
 		return objects_.SuppressAttachmentInMef(parentModelId, attModelId, localPos);
 	}
 	bool AddModelToLevelRes(const std::string& modelId,
-	                        const std::function<void(size_t,size_t)>& onProgress = nullptr) {
-		return objects_.AddModelToLevelRes(modelId, onProgress);
+	                        const std::function<void(size_t,size_t)>& onProgress = nullptr,
+	                        int sourceLevel = 0) {
+		return objects_.AddModelToLevelRes(modelId, onProgress, sourceLevel);
+	}
+	const std::vector<ModelTextureSource>& GetModelTextureSources() const {
+		return objects_.GetModelTextureSources();
 	}
 	// Force the mesh + textures for a model to load now (so a heavy model doesn't
 	// appear to hang the editor on the next frame). No-op if already cached.

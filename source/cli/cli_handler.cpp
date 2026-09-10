@@ -44,6 +44,7 @@ void CLIHandler::PrintHelp() {
       << "      --report-dir <dir>  Write per-level reports to dir\n"
       << "      --delay <sec>       Delay between levels (default: 5)\n"
       << "  --extract-level <N> [outdir]  Extract level N resources\n\n"
+      << "  --import-model <N> <model> [--source-level <N>]  Import a model family into level N\n\n"
       << "For asset conversion, use igi1conv.exe (in editor/tools/):\n"
       << "  igi1conv tex / mef / qsc / qvm / res / mtp / dat / terrain / fnt / graph\n"
       << "  Run: igi1conv --help\n";
@@ -71,13 +72,18 @@ int CLIHandler::Process(int argc, char **argv) {
     } else if (arg == "--import-model" && i + 2 < argc) {
       int levelNo = std::stoi(argv[++i]);
       std::string modelId = argv[++i];
+      int sourceLevel = 0;
+      if (i + 2 < argc && std::string(argv[i + 1]) == "--source-level") {
+        sourceLevel = std::stoi(argv[i + 2]);
+        i += 2;
+      }
       Renderer_Objects robj;
       robj.SetLevel(levelNo);
       bool ok = robj.AddModelToLevelRes(modelId, [](size_t done, size_t total) {
         if (total > 0 && (done == 0 || done == total || done % 5 == 0)) {
           std::cout << "[Import] Packing textures: " << done << "/" << total << std::endl;
         }
-      });
+      }, sourceLevel);
       if (ok) {
         std::cout << "[Import] SUCCESS: Model '" << modelId << "' imported into level " << levelNo << std::endl;
         return 0;

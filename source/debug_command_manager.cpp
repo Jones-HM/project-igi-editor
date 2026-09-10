@@ -86,8 +86,12 @@ void DebugCommandManager::ProcessCommand(const DebugCommand& cmd) {
     
     if (cmd.type == "goto") {
         GotoModel(cmd);
+    } else if (cmd.type == "set-camera") {
+        SetCamera(cmd);
     } else if (cmd.type == "capture-model") {
         CaptureModel(cmd);
+    } else if (cmd.type == "capture-spline") {
+        CaptureSplineTrace(cmd);
     } else if (cmd.type == "delete") {
         DeleteModel(cmd);
     } else if (cmd.type == "wireframe") {
@@ -248,6 +252,29 @@ static bool WriteDiagnosticMask(const char* pngPath, const std::vector<unsigned 
         }
     }
     return stbi_write_png(pngPath, w, h, 3, rgb.data(), w * 3) != 0;
+}
+
+void DebugCommandManager::CaptureSplineTrace(const DebugCommand& cmd) {
+    app_->renderer_.RequestSplineTrace(cmd.path);
+    Logger::Get().Log(LogLevel::INFO, "[Debug] Spline trace requested: " + cmd.path);
+}
+
+void DebugCommandManager::SetCamera(const DebugCommand& cmd) {
+    double x = cmd.x;
+    double y = cmd.y;
+    double z = cmd.z;
+    if (std::abs(x) < 1000000.0 && std::abs(y) < 1000000.0 && std::abs(z) < 1000000.0) {
+        x *= 256.0;
+        y *= 256.0;
+        z *= 256.0;
+    }
+
+    app_->viewer_.pos_ = glm::vec3(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z));
+    app_->viewer_.yaw_ = static_cast<float>(cmd.yaw);
+    app_->viewer_.pitch_ = static_cast<float>(cmd.pitch);
+    app_->viewer_.roll_ = 0.0f;
+    app_->UpdateViewerVectors();
+    Logger::Get().Log(LogLevel::INFO, "[Debug] Camera set by developer command");
 }
 
 static bool WriteDiagnosticPartMask(const char* pngPath, const std::vector<int>& values,

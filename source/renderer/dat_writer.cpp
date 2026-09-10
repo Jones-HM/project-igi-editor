@@ -238,6 +238,26 @@ void DAT_AddModel(DATFile& dat, const std::string& modelName,
     }
 }
 
+bool DAT_UpsertModel(DATFile& dat, const std::string& modelName,
+                     const std::vector<std::string>& textureNames) {
+    for (auto& model : dat.models) {
+        if (model.modelName != modelName) continue;
+        if (model.textures == textureNames) return false;
+        model.textures = textureNames;
+        for (const auto& texture : textureNames) {
+            if (std::find(dat.allTextures.begin(), dat.allTextures.end(), texture) == dat.allTextures.end()) {
+                dat.allTextures.push_back(texture);
+            }
+        }
+        dat.declaredTextureCount = static_cast<int>(dat.allTextures.size());
+        return true;
+    }
+
+    bool alreadyPresent = false;
+    DAT_AddModel(dat, modelName, textureNames, alreadyPresent);
+    return !alreadyPresent;
+}
+
 std::string DAT_FormatReport(const DATFile& dat, const std::string& modelFilter) {
     std::ostringstream out;
 

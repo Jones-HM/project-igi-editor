@@ -1,5 +1,17 @@
 # Changelogs
 
+## Unreleased — Foreign model source provenance
+
+- Added exact source-level provenance for cross-level model imports.
+- Rejects ambiguous automatic imports when same IDs have different mesh or
+  texture bundles; explicit source selection is required.
+- Stages and validates model RES, texture RES, DAT, and regenerated MTP output
+  before atomic publication, replacing stale differing RES entries.
+- Added regression coverage and a disposable WMI Session 1 E2E harness with
+  hash-verified model/texture/mapping checks.
+- Release remains gated by the full-suite failures and the required 30 MB
+  runtime-memory check; see [`docs/ISSUE_FIXES.md`](docs/ISSUE_FIXES.md).
+
 ## Unreleased — Editor workflow E2E (`e2e-editor-harness`)
 
 - **Fixed AMD OpenGL Driver Crash (`0x6ED690D2` / `0x444` Access Violation)**:

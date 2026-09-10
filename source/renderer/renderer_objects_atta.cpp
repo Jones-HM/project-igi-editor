@@ -129,7 +129,8 @@ bool Renderer_Objects::SuppressAttachmentInMef(const std::string& parentModelId,
 static bool AddEntriesToRes(const std::string& resPath,
                             const std::vector<RESEntry>& wanted,
                             std::string& err,
-                            const std::function<void(size_t,size_t)>& onProgress = nullptr) {
+                            const std::function<void(size_t,size_t)>& onProgress = nullptr,
+                            bool replaceExisting = false) {
     auto equalsCI = [](const std::string& a, const std::string& b) {
         if (a.size() != b.size()) return false;
         for (size_t i = 0; i < a.size(); ++i)
@@ -139,20 +140,28 @@ static bool AddEntriesToRes(const std::string& resPath,
 
     // Pass 1: stream source to find which wanted names are already present.
     std::vector<bool> present(wanted.size(), false);
+    std::vector<bool> differs(wanted.size(), false);
     std::string ferr;
     if (!RES_ForEachEntry(resPath,
-            [&](const std::string& name, const uint8_t*, size_t) {
-                for (size_t i = 0; i < wanted.size(); ++i)
-                    if (!present[i] && equalsCI(name, wanted[i].name)) present[i] = true;
+            [&](const std::string& name, const uint8_t* data, size_t size) {
+                for (size_t i = 0; i < wanted.size(); ++i) {
+                    if (!equalsCI(name, wanted[i].name)) continue;
+                    present[i] = true;
+                    if (size != wanted[i].data.size() ||
+                        !std::equal(data, data + size, wanted[i].data.begin())) {
+                        differs[i] = true;
+                    }
+                }
             }, ferr)) {
         err = "membership scan failed: " + ferr;
         return false;
     }
 
     std::vector<RESEntry> toAdd;
-    for (size_t i = 0; i < wanted.size(); ++i)
-        if (!present[i]) toAdd.push_back(wanted[i]);
-    if (toAdd.empty()) return true;  // everything already present -> no-op success
+    for (size_t i = 0; i < wanted.size(); ++i) {
+        if (!present[i] || (replaceExisting && differs[i])) toAdd.push_back(wanted[i]);
+    }
+    if (toAdd.empty()) return true;  // requested bytes are already present
 
     const std::string bak = resPath + ".orig";
     if (!std::filesystem::exists(bak)) {
@@ -165,7 +174,10 @@ static bool AddEntriesToRes(const std::string& resPath,
     }
 
     const std::string tmp = resPath + ".tmp";
-    if (!RES_StreamAppend(resPath, toAdd, tmp, err, onProgress)) {
+    const bool merged = replaceExisting
+        ? RES_StreamMerge(resPath, toAdd, tmp, err, onProgress)
+        : RES_StreamAppend(resPath, toAdd, tmp, err, onProgress);
+    if (!merged) {
         std::error_code rmec;
         std::filesystem::remove(tmp, rmec);
         return false;
@@ -239,8 +251,51 @@ static bool RunIgi1conv(const std::string& args, std::string& err) {
     return true;
 }
 
+struct StagedImportFile {
+    std::string staged;
+    std::string target;
+    std::string backup;
+};
+
+static bool PublishStagedImportFiles(const std::vector<StagedImportFile>& files,
+                                     std::string& error) {
+    std::vector<StagedImportFile> backedUp;
+    auto restore = [&]() {
+        bool restored = true;
+        for (auto it = backedUp.rbegin(); it != backedUp.rend(); ++it) {
+            std::error_code ec;
+            std::filesystem::copy_file(it->backup, it->target,
+                std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) restored = false;
+        }
+        return restored;
+    };
+
+    for (const auto& file : files) {
+        std::error_code ec;
+        if (!std::filesystem::copy_file(file.target, file.backup,
+                std::filesystem::copy_options::overwrite_existing, ec)) {
+            error = "backup failed for " + file.target + ": " + ec.message();
+            if (!restore()) error += "; rollback also failed";
+            return false;
+        }
+        backedUp.push_back(file);
+
+        ec.clear();
+        std::filesystem::copy_file(file.staged, file.target,
+            std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            error = "publish failed for " + file.target + ": " + ec.message();
+            if (!restore()) error += "; rollback also failed";
+            return false;
+        }
+    }
+    return true;
+}
+
 bool Renderer_Objects::AddModelToLevelRes(const std::string& modelId,
-                                          const std::function<void(size_t,size_t)>& onProgress) {
+                                          const std::function<void(size_t,size_t)>& onProgress,
+                                          int sourceLevel) {
     const std::string levelDir = Utils::GetIGIRootPath() + "\\missions\\location0\\level" +
         std::to_string(current_level_);
     const std::string modelsRes   = levelDir + "\\models\\level"   + std::to_string(current_level_) + ".res";
@@ -248,6 +303,10 @@ bool Renderer_Objects::AddModelToLevelRes(const std::string& modelId,
 
     if (!std::filesystem::exists(modelsRes)) {
         Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: models archive missing: " + modelsRes);
+        return false;
+    }
+    if (!std::filesystem::exists(texturesRes)) {
+        Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: textures archive missing: " + texturesRes);
         return false;
     }
 
@@ -377,13 +436,80 @@ bool Renderer_Objects::AddModelToLevelRes(const std::string& modelId,
         return false;
     }
 
-    // 1. Batch-add ALL family MEFs to the models archive (single streaming append).
+    // Resolve every mapping before touching either destination archive. The
+    // requested model uses its owning level's exact DAT entry, so a stale
+    // destination entry cannot become the import source.
+    EnsureGlobalTextureMapLoaded();
+    std::map<std::string, std::vector<std::string>> familyTextureIds;
+    std::map<std::string, int> familySourceLevels;
+    int requestedSourceLevel = sourceLevel;
+    if (sourceLevel <= 0) {
+        // The same model and texture IDs can denote different assets in
+        // different levels. An untagged import is therefore valid only when
+        // every exact source bundle is byte-identical.
+        std::vector<ModelSourceBundle> bundles;
+        std::unordered_set<int> sourceLevels;
+        for (const auto& candidate : texture_sources_) {
+            if (candidate.modelId != modelId || candidate.level <= 0 ||
+                !sourceLevels.insert(candidate.level).second) continue;
+
+            LoadResCache(candidate.level, Utils::GetIGIRootPath());
+            ModelSourceBundle bundle;
+            bundle.level = candidate.level;
+            bundle.textureIds = candidate.textures;
+            bundle.meshBytes = FindMeshDataFromLevel(modelId, candidate.level);
+            for (const auto& textureId : candidate.textures) {
+                bundle.textureBytes.push_back(
+                    FindTextureDataFromLevel(textureId, candidate.level));
+            }
+            bundles.push_back(std::move(bundle));
+        }
+        requestedSourceLevel = SelectUnambiguousModelSourceLevel(bundles);
+        if (requestedSourceLevel == 0) {
+            Logger::Get().Log(LogLevel::WARNING,
+                "[Renderer] AddModelToLevelRes: ambiguous source for '" + modelId +
+                "'; select a source level explicitly");
+            return false;
+        }
+        Logger::Get().Log(LogLevel::INFO,
+            "[Renderer] AddModelToLevelRes: untagged equivalent source level " +
+            std::to_string(requestedSourceLevel) + " for '" + modelId +
+            "'");
+    }
+    if (requestedSourceLevel < 1 || requestedSourceLevel > 14) {
+        Logger::Get().Log(LogLevel::WARNING,
+            "[Renderer] AddModelToLevelRes: invalid source level " + std::to_string(requestedSourceLevel));
+        return false;
+    }
+    for (const auto& fm : familyModels) {
+        int familySourceLevel = requestedSourceLevel;
+        auto mapping = GetTextureIdsForSourceModel(fm.first, familySourceLevel);
+        if (mapping.empty() && fm.first != modelId) {
+            // ATTA helper meshes can intentionally inherit their parent's
+            // material list when they have no standalone DAT entry.
+            mapping = GetTextureIdsForModel(fm.first);
+        }
+        if (mapping.empty()) {
+            Logger::Get().Log(LogLevel::WARNING,
+                "[Renderer] AddModelToLevelRes: unresolved texture mapping for '" + fm.first + "'");
+            return false;
+        }
+        familyTextureIds.emplace(fm.first, std::move(mapping));
+        familySourceLevels.emplace(fm.first, familySourceLevel);
+    }
+
+    // 1. Read ALL family MEFs before changing either destination archive.
     std::vector<RESEntry> modelEntries;
     std::vector<std::pair<std::string, std::vector<uint8_t>>> looseModels; // for editor-content copy
     modelEntries.reserve(familyModels.size());
     for (const auto& fm : familyModels) {
-        std::ifstream mf(fm.second, std::ios::binary);
-        std::vector<uint8_t> mefBytes((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
+        const int familySourceLevel = familySourceLevels.at(fm.first);
+        LoadResCache(familySourceLevel, Utils::GetIGIRootPath());
+        std::vector<uint8_t> mefBytes = FindMeshDataFromLevel(fm.first, familySourceLevel);
+        if (mefBytes.empty()) {
+            std::ifstream mf(fm.second, std::ios::binary);
+            mefBytes.assign(std::istreambuf_iterator<char>(mf), std::istreambuf_iterator<char>());
+        }
         if (mefBytes.empty()) {
             Logger::Get().Log(LogLevel::INFO, "[Renderer] AddModelToLevelRes: empty/unreadable family .mef, skipping: " + fm.second);
             continue;
@@ -396,18 +522,97 @@ bool Renderer_Objects::AddModelToLevelRes(const std::string& modelId,
         return false;
     }
 
-    std::string err;
-    if (!AddEntriesToRes(modelsRes, modelEntries, err)) {
-        Logger::Get().Log(LogLevel::ERR, "[Renderer] AddModelToLevelRes: model add failed: " + err);
+    const std::string datPath = levelDir + "\\level" + std::to_string(current_level_) + ".dat";
+    const std::string mtpPath = levelDir + "\\level" + std::to_string(current_level_) + ".mtp";
+    if (!std::filesystem::exists(datPath) || !std::filesystem::exists(mtpPath)) {
+        Logger::Get().Log(LogLevel::WARNING,
+            "[Renderer] AddModelToLevelRes: complete destination DAT/MTP pair is required");
         return false;
     }
-    Logger::Get().Log(LogLevel::INFO, "[Renderer] AddModelToLevelRes: family '" + prefix + "' (" +
-        std::to_string(modelEntries.size()) + " mef) -> " + modelsRes);
 
-    // 2. Gather + batch-add ALL family textures into the textures archive in ONE
+    DATFile stagedDat;
+    if (!persistent_dat_.valid || persistent_dat_path_ != datPath) {
+        persistent_dat_ = DAT_Parse(datPath);
+        persistent_dat_path_ = datPath;
+    }
+    if (!persistent_dat_.valid) {
+        Logger::Get().Log(LogLevel::WARNING,
+            "[Renderer] AddModelToLevelRes: destination DAT parse failed: " + persistent_dat_.error);
+        return false;
+    }
+    stagedDat = persistent_dat_;
+
+    const auto stageId = std::to_string(GetCurrentProcessId()) + "-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const std::filesystem::path stagingDir = std::filesystem::path(levelDir) /
+        (".igi-import-staging-" + stageId);
+    const std::filesystem::path stagingBackupDir = stagingDir / "backups";
+    std::error_code stageEc;
+    std::filesystem::create_directories(stagingBackupDir, stageEc);
+    if (stageEc) {
+        Logger::Get().Log(LogLevel::WARNING,
+            "[Renderer] AddModelToLevelRes: staging directory creation failed: " + stageEc.message());
+        return false;
+    }
+    const auto cleanupStaging = [&]() {
+        std::error_code ec;
+        std::filesystem::remove_all(stagingDir, ec);
+    };
+    const std::string stagedModelsRes = (stagingDir / "models.res").string();
+    const std::string stagedTexturesRes = (stagingDir / "textures.res").string();
+    const std::string stagedDatPath = (stagingDir / "level.dat").string();
+    const std::string stagedMtpPath = (stagingDir / "level.mtp").string();
+    for (const auto& pair : std::vector<std::pair<std::string, std::string>>{
+            {modelsRes, stagedModelsRes}, {texturesRes, stagedTexturesRes},
+            {datPath, stagedDatPath}, {mtpPath, stagedMtpPath}}) {
+        std::error_code ec;
+        if (!std::filesystem::copy_file(pair.first, pair.second,
+                std::filesystem::copy_options::overwrite_existing, ec)) {
+            Logger::Get().Log(LogLevel::WARNING,
+                "[Renderer] AddModelToLevelRes: staging copy failed for " + pair.first + ": " + ec.message());
+            cleanupStaging();
+            return false;
+        }
+    }
+
+    // Validate every MEF material slot against the selected ordered mapping
+    // before staging any archive append. An out-of-range slot would otherwise
+    // silently bind a different texture at runtime.
+    for (const auto& fm : familyModels) {
+        std::ifstream mf(fm.second, std::ios::binary);
+        std::vector<uint8_t> mefBytes((std::istreambuf_iterator<char>(mf)), std::istreambuf_iterator<char>());
+        if (mefBytes.empty()) continue;
+        try {
+            const ParsedGeometry geometry = ParseMefFileFromMemory(mefBytes, fm.first);
+            std::vector<int> materialSlots;
+            if (geometry.renderBlocks.empty()) {
+                materialSlots.push_back(0);
+            } else {
+                materialSlots.reserve(geometry.renderBlocks.size());
+                for (const auto& block : geometry.renderBlocks) {
+                    materialSlots.push_back(block.materialSlot);
+                }
+            }
+            if (!IsTextureMappingCompatible(materialSlots,
+                                             familyTextureIds.at(fm.first).size())) {
+                Logger::Get().Log(LogLevel::WARNING,
+                    "[Renderer] AddModelToLevelRes: MEF material slot exceeds ordered texture mapping for '" +
+                    fm.first + "'");
+                cleanupStaging();
+                return false;
+            }
+        } catch (const std::exception& e) {
+            Logger::Get().Log(LogLevel::WARNING,
+                "[Renderer] AddModelToLevelRes: MEF material validation failed for '" +
+                fm.first + "': " + e.what());
+            cleanupStaging();
+            return false;
+        }
+    }
+
+    // 2. Gather ALL family textures before changing either destination archive.
     //    batched streaming append (the textures .res is 200MB+ — stream it once,
     //    never per-texture, and never RES_Parse it into RAM).
-    const bool haveTexRes = std::filesystem::exists(texturesRes);
     int texAdded = 0;
     std::vector<std::pair<std::string, std::vector<uint8_t>>> looseTextures;  // for editor-content copy
     std::vector<RESEntry> texEntries;
@@ -418,22 +623,30 @@ bool Renderer_Objects::AddModelToLevelRes(const std::string& modelId,
     // archive index hiding entries that are already packed on disk.
     RefreshTextureResCache();
     for (const auto& fm : familyModels) {
-        for (const std::string& texId : GetTextureIdsForModel(fm.first)) {
+        for (const std::string& texId : familyTextureIds.at(fm.first)) {
             if (!seenTex.insert(texId).second) continue; // dedupe across the family
             std::vector<uint8_t> texBytes;
-            std::string texPath = FindTextureFile(texId);
-            if (!texPath.empty()) {
+            const int sourceLevel = familySourceLevels.at(fm.first);
+            LoadResCache(sourceLevel, Utils::GetIGIRootPath());
+            texBytes = FindTextureDataFromLevel(texId, sourceLevel);
+
+            // Loose files are a fallback for a source level that has no packed
+            // copy. Search only that level; a destination-level loose file with
+            // the same ID must never override the selected source bytes.
+            std::string texPath;
+            if (texBytes.empty()) texPath = FindTextureFileInLevel(texId, sourceLevel);
+            if (!texPath.empty() && texBytes.empty()) {
                 std::ifstream tf(texPath, std::ios::binary);
                 texBytes.assign(std::istreambuf_iterator<char>(tf), std::istreambuf_iterator<char>());
             }
             // Foreign texture not on disk: pull it straight from the owning
             // level's packed .res via the cross-level ResCache (same fallback
             // GetOrLoadTexture already uses for in-editor rendering).
-            if (texBytes.empty()) {
+            if (texBytes.empty() && sourceLevel != current_level_) {
                 auto tit = texture_level_map_.find(texId);
                 if (tit != texture_level_map_.end() && tit->second != current_level_) {
                     LoadResCache(tit->second, Utils::GetIGIRootPath());
-                    texBytes = FindTextureData(texId);
+                    texBytes = FindTextureDataFromLevel(texId, tit->second);
                 }
             }
             if (texBytes.empty()) {
@@ -442,40 +655,106 @@ bool Renderer_Objects::AddModelToLevelRes(const std::string& modelId,
                 // archive using the same indexed reader used by rendering.
                 for (int level = 1; level <= 14 && texBytes.empty(); ++level) {
                     LoadResCache(level, Utils::GetIGIRootPath());
-                    texBytes = FindTextureData(texId);
+                    texBytes = FindTextureDataFromLevel(texId, level);
                 }
             }
             if (texBytes.empty()) {
-                Logger::Get().Log(LogLevel::INFO, "[Renderer] AddModelToLevelRes: texture " + texId +
-                    " not found on disk or in any level's .res, skipping");
-                continue;
+                Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: required texture " + texId +
+                    " not found on disk or in any level's .res");
+                cleanupStaging();
+                return false;
             }
             looseTextures.emplace_back(texId, texBytes);
             texEntries.push_back(RESEntry{ "LOCAL:textures/" + texId + ".tex", std::move(texBytes) });
         }
     }
 
+    // 3. Batch-add ALL family MEFs to the models archive (single streaming append).
+    // This happens only after every required texture was resolved and packed.
+    std::string err;
+    if (!AddEntriesToRes(stagedModelsRes, modelEntries, err, nullptr, true)) {
+        Logger::Get().Log(LogLevel::ERR, "[Renderer] AddModelToLevelRes: model add failed: " + err);
+        cleanupStaging();
+        return false;
+    }
+    Logger::Get().Log(LogLevel::INFO, "[Renderer] AddModelToLevelRes: staged family '" + prefix + "' (" +
+        std::to_string(modelEntries.size()) + " mef)");
+
     if (!texEntries.empty()) {
-        if (!haveTexRes) {
-            Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: textures archive missing, "
-                "skipping texture packing: " + texturesRes);
-            looseTextures.clear();
-        } else {
-            std::string terr;
-            if (AddEntriesToRes(texturesRes, texEntries, terr, onProgress)) {
-                texAdded = (int)texEntries.size();
-                // PreloadModel runs immediately after this call. Re-index the
-                // appended archive so it sees the newly packed textures.
-                RefreshTextureResCache();
-            } else {
-                Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: texture pack failed for family '" +
-                    prefix + "': " + terr);
-                looseTextures.clear();
-            }
+        std::string stagedTextureError;
+        if (!AddEntriesToRes(stagedTexturesRes, texEntries, stagedTextureError, onProgress, true)) {
+            Logger::Get().Log(LogLevel::WARNING,
+                "[Renderer] AddModelToLevelRes: staged texture pack failed: " + stagedTextureError);
+            cleanupStaging();
+            return false;
         }
+        texAdded = static_cast<int>(texEntries.size());
     }
 
-    // 3. Best-effort: copy loose files into the editor's content dirs so the editor
+    // 3. Register the model + its textures so the GAME can resolve the model's
+    //    materials (otherwise it renders transparent in-game). We update the TEXT
+    //    level<N>.dat then drive mtp_decoder.exe to regenerate the binary level<N>.mtp
+    //    (the game accepts the tool's output; a natively-written .mtp crashed it).
+    //    Required metadata publication is part of import success. A model archive
+    //    append without a matching DAT/MTP mapping is not a complete import.
+    for (const auto& fm : familyModels) {
+        if (!DAT_UpsertModel(stagedDat, fm.first, familyTextureIds.at(fm.first))) {
+            continue;
+        }
+    }
+    // DAT_UpsertModel returns false for both an idempotent match and an
+    // unsuccessful/no-op path.  Verify the staged result explicitly so a
+    // missing or mismatched required mapping cannot be published as success.
+    for (const auto& fm : familyModels) {
+        const auto mappingIt = std::find_if(stagedDat.models.begin(), stagedDat.models.end(),
+            [&](const DATModelEntry& entry) { return entry.modelName == fm.first; });
+        if (mappingIt == stagedDat.models.end() ||
+            mappingIt->textures != familyTextureIds.at(fm.first)) {
+            Logger::Get().Log(LogLevel::WARNING,
+                "[Renderer] AddModelToLevelRes: staged DAT mapping verification failed for '" + fm.first + "'");
+            cleanupStaging();
+            return false;
+        }
+    }
+    std::string datError;
+    if (!DAT_WriteNative(stagedDat, stagedDatPath, datError)) {
+        Logger::Get().Log(LogLevel::WARNING,
+            "[Renderer] AddModelToLevelRes: staged DAT write failed: " + datError);
+        cleanupStaging();
+        return false;
+    }
+    std::string convErr;
+    if (!RunIgi1conv("dat to-mtp \"" + stagedDatPath + "\" -o \"" + stagedMtpPath + "\"", convErr)) {
+        Logger::Get().Log(LogLevel::WARNING,
+            "[Renderer] AddModelToLevelRes: staged MTP conversion failed: " + convErr);
+        cleanupStaging();
+        return false;
+    }
+    const DATFile verifiedDat = DAT_Parse(stagedDatPath);
+    if (!verifiedDat.valid || std::filesystem::file_size(stagedMtpPath) == 0) {
+        Logger::Get().Log(LogLevel::WARNING,
+            "[Renderer] AddModelToLevelRes: staged metadata verification failed");
+        cleanupStaging();
+        return false;
+    }
+
+    const std::vector<StagedImportFile> files{
+        {stagedModelsRes, modelsRes, (stagingBackupDir / "models.res").string()},
+        {stagedTexturesRes, texturesRes, (stagingBackupDir / "textures.res").string()},
+        {stagedDatPath, datPath, (stagingBackupDir / "level.dat").string()},
+        {stagedMtpPath, mtpPath, (stagingBackupDir / "level.mtp").string()}};
+    std::string publishError;
+    if (!PublishStagedImportFiles(files, publishError)) {
+        Logger::Get().Log(LogLevel::WARNING,
+            "[Renderer] AddModelToLevelRes: import publication failed: " + publishError);
+        cleanupStaging();
+        return false;
+    }
+    persistent_dat_ = verifiedDat;
+    persistent_dat_path_ = datPath;
+    cleanupStaging();
+
+    // 4. Best-effort: copy loose files into the editor's content dirs so the editor
     //    keeps resolving them after a level reload. Failure here is non-fatal.
     try {
         const std::string exeDir = Utils::GetExeDirectory();
@@ -506,116 +785,12 @@ bool Renderer_Objects::AddModelToLevelRes(const std::string& modelId,
         Logger::Get().Log(LogLevel::WARNING, std::string("[Renderer] AddModelToLevelRes: editor-content copy failed: ") + e.what());
     }
 
-    // 4. Register the model + its textures so the GAME can resolve the model's
-    //    materials (otherwise it renders transparent in-game). We update the TEXT
-    //    level<N>.dat then drive mtp_decoder.exe to regenerate the binary level<N>.mtp
-    //    (the game accepts the tool's output; a natively-written .mtp crashed it).
-    //    A failure here is a WARNING only -- the .res parts already succeeded.
-    {
-        const std::string lvl = std::to_string(current_level_);
-        const std::string lvlDir = Utils::GetIGIRootPath() +
-            "\\missions\\location0\\level" + lvl + "\\";
-        const std::string datPath = lvlDir + "level" + lvl + ".dat";
-        const std::string mtpPath = lvlDir + "level" + lvl + ".mtp";
-
-        if (!std::filesystem::exists(datPath)) {
-            Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: level .dat not found, "
-                "skipping model->texture mapping: " + datPath);
-        } else {
-            // 4a. Back up the .dat once, then add the model mapping and write it back.
-            bool proceed = true;
-            const std::string datBackup = datPath + ".orig";
-            if (!std::filesystem::exists(datBackup)) {
-                std::error_code ec;
-                std::filesystem::copy_file(datPath, datBackup,
-                    std::filesystem::copy_options::overwrite_existing, ec);
-                if (ec) {
-                    proceed = false;
-                    Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: could not back up "
-                        ".dat, skipping mapping update: " + datBackup + " (" + ec.message() + ")");
-                }
-            }
-
-            if (proceed) {
-                // Use the persistent in-memory DAT to avoid data loss caused by
-                // mtp_decoder.exe rewriting level.dat on disk between adds.
-                // On the first add this session, populate it from disk; on all
-                // subsequent adds for the same level, reuse the accumulated copy.
-                if (!persistent_dat_.valid || persistent_dat_path_ != datPath) {
-                    persistent_dat_ = DAT_Parse(datPath);
-                    persistent_dat_path_ = datPath;
-                    if (!persistent_dat_.valid) {
-                        Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: initial .dat parse failed: "
-                            + persistent_dat_.error + " — clearing persistent cache");
-                        persistent_dat_path_.clear();
-                    }
-                }
-                DATFile& dat = persistent_dat_;
-                if (!dat.valid) {
-                    Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: .dat parse failed, "
-                        "skipping mapping update: " + dat.error);
-                } else {
-                    // Add EVERY family model to the .dat; write once if any were new.
-                    bool anyAdded = false;
-                    for (const auto& fm : familyModels) {
-                        bool present = false;
-                        DAT_AddModel(dat, fm.first, GetTextureIdsForModel(fm.first), present);
-                        if (!present) anyAdded = true;
-                    }
-                    bool datReady = true; // either we'll write below, or it's already complete
-                    if (anyAdded) {
-                        std::string derr;
-                        if (DAT_WriteNative(dat, datPath, derr)) {
-                            Logger::Get().Log(LogLevel::INFO, "[Renderer] AddModelToLevelRes: added family '" +
-                                prefix + "' to " + datPath);
-                        } else {
-                            datReady = false;
-                            Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: .dat write "
-                                "failed for family '" + prefix + "': " + derr);
-                        }
-                    } else {
-                        Logger::Get().Log(LogLevel::INFO, "[Renderer] AddModelToLevelRes: family '" + prefix +
-                            "' already mapped in " + datPath);
-                    }
-
-                    // 4b. Back up the .mtp once, then REGENERATE it from the updated
-                    // .dat via the bundled igi1conv converter. `dat to-mtp` reproduces
-                    // the game's binary .mtp exactly (verified byte-identical to the
-                    // originals), so the model→texture mapping stays correct in-game
-                    // and after reload. The editor no longer writes .mtp in-process.
-                    if (datReady && std::filesystem::exists(mtpPath)) {
-                        const std::string mtpBackup = mtpPath + ".orig";
-                        if (!std::filesystem::exists(mtpBackup)) {
-                            std::error_code ec;
-                            std::filesystem::copy_file(mtpPath, mtpBackup,
-                                std::filesystem::copy_options::overwrite_existing, ec);
-                            if (ec)
-                                Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: "
-                                    "could not back up .mtp: " + mtpBackup + " (" + ec.message() + ")");
-                        }
-                        std::string convErr;
-                        if (RunIgi1conv("dat to-mtp \"" + datPath + "\" -o \"" + mtpPath + "\"", convErr)) {
-                            Logger::Get().Log(LogLevel::INFO, "[Renderer] AddModelToLevelRes: regenerated " +
-                                mtpPath + " from .dat via igi1conv");
-                        } else {
-                            Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: "
-                                "igi1conv dat to-mtp failed: " + convErr);
-                        }
-                    } else if (datReady) {
-                        Logger::Get().Log(LogLevel::WARNING, "[Renderer] AddModelToLevelRes: "
-                            ".mtp not found, skipping MTP update: " + mtpPath);
-                    }
-                }
-            }
-        }
-    }
-
-    // 5. Invalidate caches and reload mapping so subsequent rendering sees the new assets immediately
+    // 6. Invalidate caches and reload mapping so subsequent rendering sees the new assets immediately
     texture_map_level_ = -1;
     EnsureTextureMapLoaded();
     RefreshTextureResCache();
     for (const auto& fm : familyModels) {
-        auto texs = GetTextureIdsForModel(fm.first);
+        const auto texs = familyTextureIds.at(fm.first);
         global_texture_map_[fm.first] = texs;
         model_level_map_[fm.first] = current_level_;
         for (const auto& t : texs) {

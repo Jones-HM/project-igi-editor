@@ -5,29 +5,6 @@
  *****************************************************************************/
 #include "renderer_objects_internal.h"
 
-// Strip pixel-format suffixes that appear in DAT texture IDs but aren't part
-// of the actual .tex filename on disk (e.g. "009_09_1_argb8888" → "009_09_1").
-static std::string StripTextureFormatSuffix(const std::string& texId) {
-    static const char* const kSuffixes[] = {
-        "_argb8888", "_rgb565", "_argb1555", "_argb4444",
-        "_a8r8g8b8", "_r5g6b5", "_a1r5g5b5", "_a4r4g4b4"
-    };
-    for (const char* suf : kSuffixes) {
-        const size_t sufLen = std::strlen(suf);
-        if (texId.size() > sufLen) {
-            // Case-insensitive suffix check
-            std::string tail = texId.substr(texId.size() - sufLen);
-            std::string sufLower(suf);
-            for (auto& c : tail)     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            for (auto& c : sufLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            if (tail == sufLower) {
-                return texId.substr(0, texId.size() - sufLen);
-            }
-        }
-    }
-    return texId;
-}
-
 // True if a DAT texture id is flagged with an alpha-bearing pixel format
 // (e.g. "009_09_1_argb8888"). These textures carry real per-texel transparency
 // (sunglasses lenses, visors) that must be alpha-blended; the opaque pass would
@@ -114,11 +91,14 @@ void Renderer_Objects::EnsureGlobalTextureMapLoaded() const {
             DATFile dat = DAT_Parse(datPath);
             if (dat.valid) {
                 for (const auto& m : dat.models) {
-                    global_texture_map_[m.modelName] = m.textures;
-                    model_level_map_[m.modelName] = lvl;
+                    texture_sources_.push_back(ModelTextureSource{lvl, m.modelName, m.textures});
+                    if (global_texture_map_.find(m.modelName) == global_texture_map_.end()) {
+                        global_texture_map_[m.modelName] = m.textures;
+                        model_level_map_[m.modelName] = lvl;
+                    }
                 }
                 for (const auto& t : dat.allTextures) {
-                    texture_level_map_[t] = lvl;
+                    texture_level_map_.emplace(t, lvl);
                 }
             }
         }
@@ -130,9 +110,11 @@ void Renderer_Objects::EnsureGlobalTextureMapLoaded() const {
         DATFile dat = DAT_Parse(commonDat);
         if (dat.valid) {
             for (const auto& m : dat.models) {
-                if (global_texture_map_.find(m.modelName) == global_texture_map_.end())
+                if (global_texture_map_.find(m.modelName) == global_texture_map_.end()) {
                     global_texture_map_[m.modelName] = m.textures;
-                model_level_map_.emplace(m.modelName, 0);
+                    texture_sources_.push_back(ModelTextureSource{0, m.modelName, m.textures});
+                    model_level_map_.emplace(m.modelName, 0);
+                }
             }
             for (const auto& t : dat.allTextures) {
                 if (texture_level_map_.find(t) == texture_level_map_.end())
@@ -159,6 +141,11 @@ std::vector<std::string> Renderer_Objects::GetTextureIdsForModel(const std::stri
     // 2. Global DAT search across all other levels exact match
     EnsureGlobalTextureMapLoaded();
     {
+        auto levelIt = model_level_map_.find(modelId);
+        if (levelIt != model_level_map_.end()) {
+            const auto* source = FindExactTextureSource(texture_sources_, levelIt->second, modelId);
+            if (source != nullptr) return source->textures;
+        }
         auto it = global_texture_map_.find(modelId);
         if (it != global_texture_map_.end()) {
             return it->second;
@@ -174,6 +161,12 @@ std::vector<std::string> Renderer_Objects::GetTextureIdsForModel(const std::stri
                 auto it = model_texture_map_cache_.find(sameVariantPrimary);
                 if (it != model_texture_map_cache_.end()) {
                     return it->second;
+                }
+                auto levelIt = model_level_map_.find(sameVariantPrimary);
+                if (levelIt != model_level_map_.end()) {
+                    const auto* source = FindExactTextureSource(
+                        texture_sources_, levelIt->second, sameVariantPrimary);
+                    if (source != nullptr) return source->textures;
                 }
                 auto git = global_texture_map_.find(sameVariantPrimary);
                 if (git != global_texture_map_.end()) {
@@ -203,6 +196,11 @@ std::vector<std::string> Renderer_Objects::GetTextureIdsForModel(const std::stri
         if (p1 != std::string::npos && p1 + 4 < modelId.size()) {
             std::string primary = modelId.substr(0, p1) + "_01_1";
             if (primary != modelId) {
+                auto levelIt = model_level_map_.find(primary);
+                if (levelIt != model_level_map_.end()) {
+                    const auto* source = FindExactTextureSource(texture_sources_, levelIt->second, primary);
+                    if (source != nullptr) return source->textures;
+                }
                 auto it = global_texture_map_.find(primary);
                 if (it != global_texture_map_.end()) {
                     return it->second;
@@ -231,6 +229,18 @@ std::vector<std::string> Renderer_Objects::GetTextureIdsForModel(const std::stri
     return {};
 }
 
+std::vector<std::string> Renderer_Objects::GetTextureIdsForSourceModel(
+    const std::string& modelId, int sourceLevel) {
+    EnsureTextureMapLoaded();
+    if (sourceLevel == current_level_) {
+        const auto local = model_texture_map_cache_.find(modelId);
+        if (local != model_texture_map_cache_.end()) return local->second;
+    }
+    EnsureGlobalTextureMapLoaded();
+    const auto* source = FindExactTextureSource(texture_sources_, sourceLevel, modelId);
+    return source != nullptr ? source->textures : std::vector<std::string>{};
+}
+
 std::string Renderer_Objects::FindTextureFile(const std::string& textureId) const {
     // Helper: search one directory for the texture file
     auto searchDir = [&](const std::filesystem::path& texturesPath) -> std::string {
@@ -243,18 +253,11 @@ std::string Renderer_Objects::FindTextureFile(const std::string& textureId) cons
             if (!entry.is_regular_file()) continue;
             if (entry.path().extension() != ".tex") continue;
             const std::string stem = entry.path().stem().string();
-            // Match the exact id, or a pixel-format suffix variant ("<id>_argb8888"),
-            // but NOT a loose substring: "009_01_1" must never grab "1009_01_1.tex"
-            // (a different texture). The old substring test loaded wrong textures for
-            // AI/weapon models whose id is a tail-substring of another id.
-            const bool match =
-                stem == textureId ||
-                (stem.size() > textureId.size() &&
-                 stem.compare(0, textureId.size(), textureId) == 0 &&
-                 stem[textureId.size()] == '_') ||
-                (textureId.size() > stem.size() &&
-                 textureId.compare(0, stem.size(), stem) == 0 &&
-                 textureId[stem.size()] == '_');
+            // Match the exact id or one of the explicitly recognized pixel-format
+            // suffixes. Numeric/model suffixes are part of the texture identity;
+            // a loose underscore match can silently bind a different texture.
+            const bool match = stem == textureId ||
+                StripTextureFormatSuffix(stem) == textureId;
             if (match) {
                 return entry.path().string();
             }
@@ -326,6 +329,40 @@ std::string Renderer_Objects::FindTextureFile(const std::string& textureId) cons
     // .res lookup. Do not report a hard error here: callers may still resolve
     // the texture from an archive and the final GetOrLoadTexture warning is
     // the authoritative missing-texture diagnostic.
+    return "";
+}
+
+std::string Renderer_Objects::FindTextureFileInLevel(const std::string& textureId, int levelNo) const {
+    auto searchDir = [&](const std::filesystem::path& texturesPath) -> std::string {
+        if (!std::filesystem::exists(texturesPath)) return "";
+
+        const std::filesystem::path exactPath = texturesPath / (textureId + ".tex");
+        if (std::filesystem::exists(exactPath)) return exactPath.string();
+
+        for (const auto& entry : std::filesystem::directory_iterator(texturesPath)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".tex") continue;
+            const std::string stem = entry.path().stem().string();
+            if (stem == textureId || StripTextureFormatSuffix(stem) == textureId) {
+                return entry.path().string();
+            }
+        }
+        return "";
+    };
+
+    if (levelNo > 0) {
+        const std::string level = std::to_string(levelNo);
+        std::string result = searchDir(Utils::GetExeDirectory() + "\\editor\\textures\\level" + level);
+        if (!result.empty()) return result;
+        result = searchDir(Utils::GetIGIRootPath() + "\\missions\\location0\\level" + level + "\\textures");
+        if (!result.empty()) return result;
+    } else {
+        std::string result = searchDir(Utils::GetExeDirectory() + "\\editor\\textures\\common");
+        if (!result.empty()) return result;
+        result = searchDir(Utils::GetIGIRootPath() + "\\textures");
+        if (!result.empty()) return result;
+        result = searchDir(Utils::GetIGIRootPath() + "\\missions\\location0\\common\\textures");
+        if (!result.empty()) return result;
+    }
     return "";
 }
 

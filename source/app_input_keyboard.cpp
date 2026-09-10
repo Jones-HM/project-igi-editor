@@ -77,15 +77,15 @@ void App::Input_OnSpecial(int key, int x, int y) {
 
 	// Model picker navigation
 	if (model_picker_open_) {
-		std::vector<std::string> filtered;
+		std::vector<ModelPickerEntry> filtered;
 		std::string fl = model_picker_filter_;
 		std::transform(fl.begin(), fl.end(), fl.begin(), [](unsigned char c){ return std::tolower(c); });
-		for (const auto& id : level_model_ids_) {
-			if (fl.empty()) { filtered.push_back(id); }
+		for (const auto& entry : level_model_entries_) {
+			if (fl.empty()) { filtered.push_back(entry); }
 			else {
-				std::string idl = id;
+				std::string idl = entry.label;
 				std::transform(idl.begin(), idl.end(), idl.begin(), [](unsigned char c){ return std::tolower(c); });
-				if (idl.find(fl) != std::string::npos) filtered.push_back(id);
+				if (idl.find(fl) != std::string::npos) filtered.push_back(entry);
 			}
 		}
 		int count = (int)filtered.size();
@@ -1000,16 +1000,15 @@ void App::Input_OnKeyboard(unsigned char key, int x, int y) {
 	if (model_picker_open_) {
 		if (key == 27) { model_picker_open_ = false; return; }
 		if (key == 13) {
-			// Build filtered list from level_model_ids_
-			std::vector<std::string> filtered;
+			std::vector<ModelPickerEntry> filtered;
 			std::string fl = model_picker_filter_;
 			std::transform(fl.begin(), fl.end(), fl.begin(), [](unsigned char c){ return std::tolower(c); });
-			for (const auto& id : level_model_ids_) {
-				if (fl.empty()) { filtered.push_back(id); }
+			for (const auto& entry : level_model_entries_) {
+				if (fl.empty()) { filtered.push_back(entry); }
 				else {
-					std::string idl = id;
+					std::string idl = entry.label;
 					std::transform(idl.begin(), idl.end(), idl.begin(), [](unsigned char c){ return std::tolower(c); });
-					if (idl.find(fl) != std::string::npos) filtered.push_back(id);
+					if (idl.find(fl) != std::string::npos) filtered.push_back(entry);
 				}
 			}
 			model_picker_open_ = false;
@@ -1017,7 +1016,9 @@ void App::Input_OnKeyboard(unsigned char key, int x, int y) {
 			// the exact text box the cursor was in (even if focus changed meanwhile).
 			if (picker_target_field_ >= 0) { prop_text_edit_field_ = picker_target_field_; prop_edit_obj_index_ = picker_target_obj_; }
 			if (prop_text_edit_field_ >= 0 && model_picker_selected_ < (int)filtered.size()) {
-				prop_text_buf_ = filtered[model_picker_selected_]; // CLEAR and insert
+				const auto& chosen = filtered[model_picker_selected_];
+				prop_text_buf_ = chosen.modelId;
+				pending_model_source_level_ = chosen.sourceLevel;
 				prop_text_caret_ = (int)prop_text_buf_.size();
 				CommitPropTextEdit();              // apply the chosen model to the field
 			}

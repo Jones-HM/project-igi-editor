@@ -8,6 +8,8 @@
 #include <iostream>
 #include <vector>
 #include <cstring>
+#include <algorithm>
+#include <cctype>
 
 static const uint32_t FOURCC_ILFF = 0x46464C49; // "ILFF"
 static const uint32_t FOURCC_IRES = 0x53455249; // "IRES"
@@ -315,5 +317,137 @@ bool RES_StreamAppend(const std::string& srcResPath,
     WriteU32LE(os, finalSize);
     os.flush();
     if (!os.good()) { error = "header patch/flush failed for " + outPath; return false; }
+    return true;
+}
+
+bool RES_StreamMerge(const std::string& srcResPath,
+                     const std::vector<RESEntry>& entries,
+                     const std::string& outPath,
+                     std::string& error,
+                     const std::function<void(size_t,size_t)>& onProgress) {
+    if (entries.empty()) {
+        error = "RES_StreamMerge requires at least one entry";
+        return false;
+    }
+
+    auto equalsCI = [](const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                std::tolower(static_cast<unsigned char>(b[i]))) return false;
+        }
+        return true;
+    };
+
+    std::vector<bool> present(entries.size(), false);
+    size_t sourceCount = 0;
+    std::string ferr;
+    if (!RES_ForEachEntry(srcResPath,
+            [&](const std::string& name, const uint8_t*, size_t) {
+                ++sourceCount;
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    if (equalsCI(name, entries[i].name)) present[i] = true;
+                }
+            }, ferr)) {
+        error = "could not read source archive: " + ferr;
+        return false;
+    }
+
+    size_t missingCount = 0;
+    for (bool found : present) if (!found) ++missingCount;
+
+    std::ofstream os(outPath, std::ios::binary);
+    if (!os) {
+        error = "Failed to create output file: " + outPath;
+        return false;
+    }
+    WriteFourCC(os, FOURCC_ILFF);
+    WriteU32LE(os, 0);
+    WriteU32LE(os, 4);
+    WriteU32LE(os, 0);
+    WriteFourCC(os, FOURCC_IRES);
+
+    const size_t total = sourceCount + missingCount;
+    size_t sourceIndex = 0;
+    size_t done = 0;
+    bool streamFailed = false;
+    if (!RES_ForEachEntry(srcResPath,
+            [&](const std::string& name, const uint8_t* data, size_t size) {
+                if (streamFailed) return;
+                size_t replacement = entries.size();
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    if (equalsCI(name, entries[i].name)) {
+                        replacement = i;
+                        break;
+                    }
+                }
+                const RESEntry* selected = replacement < entries.size() ? &entries[replacement] : nullptr;
+                const bool lastSourceBody = missingCount == 0 && sourceIndex + 1 == sourceCount;
+                const std::string& outputName = selected ? selected->name : name;
+                const uint8_t* outputData = selected ? selected->data.data() : data;
+                const size_t outputSize = selected ? selected->data.size() : size;
+                std::vector<uint8_t> nameBytes(outputName.begin(), outputName.end());
+                nameBytes.push_back(0);
+                WriteResChunk(os, FOURCC_NAME, nameBytes.data(),
+                              static_cast<uint32_t>(nameBytes.size()), false);
+                WriteResChunk(os, FOURCC_BODY, outputData,
+                              static_cast<uint32_t>(outputSize), lastSourceBody);
+                if (!os.good()) { streamFailed = true; return; }
+                ++sourceIndex;
+                if (onProgress) onProgress(++done, total);
+            }, ferr)) {
+        error = "source stream failed: " + ferr;
+        std::error_code ec;
+        std::filesystem::remove(outPath, ec);
+        return false;
+    }
+    if (streamFailed || !os.good()) {
+        error = "write failed while merging source entries to " + outPath;
+        std::error_code ec;
+        std::filesystem::remove(outPath, ec);
+        return false;
+    }
+
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (present[i]) continue;
+        const auto& entry = entries[i];
+        std::vector<uint8_t> nameBytes(entry.name.begin(), entry.name.end());
+        nameBytes.push_back(0);
+        WriteResChunk(os, FOURCC_NAME, nameBytes.data(),
+                      static_cast<uint32_t>(nameBytes.size()), false);
+        WriteResChunk(os, FOURCC_BODY, entry.data.data(),
+                      static_cast<uint32_t>(entry.data.size()), i + 1 == entries.size() ||
+                      std::all_of(present.begin() + i + 1, present.end(), [](bool value) { return value; }));
+        if (!os.good()) {
+            error = "write failed appending merged entry to " + outPath;
+            std::error_code ec;
+            std::filesystem::remove(outPath, ec);
+            return false;
+        }
+        if (onProgress) onProgress(++done, total);
+    }
+
+    if (!os.good()) {
+        error = "write failed (stream error) for " + outPath;
+        std::error_code ec;
+        std::filesystem::remove(outPath, ec);
+        return false;
+    }
+    const std::streampos end = os.tellp();
+    if (end == std::streampos(-1) || static_cast<uint64_t>(end) > UINT32_MAX) {
+        error = "output size cannot be represented in RES header: " + outPath;
+        std::error_code ec;
+        std::filesystem::remove(outPath, ec);
+        return false;
+    }
+    os.seekp(4, std::ios::beg);
+    WriteU32LE(os, static_cast<uint32_t>(end));
+    os.flush();
+    if (!os.good()) {
+        error = "header patch/flush failed for " + outPath;
+        std::error_code ec;
+        std::filesystem::remove(outPath, ec);
+        return false;
+    }
     return true;
 }

@@ -113,3 +113,27 @@ TEST_F(ResStreamAppendTest, EmptyNewEntriesIsAnError) {
     EXPECT_FALSE(RES_StreamAppend(src.string(), {}, out.string(), err));
     EXPECT_FALSE(err.empty());
 }
+
+TEST_F(ResStreamAppendTest, ReplacesMatchingEntryAndAppendsMissingEntry) {
+    const RESFile original = RES_Parse(src.string());
+    ASSERT_TRUE(original.valid) << original.error;
+    ASSERT_FALSE(original.entries.empty());
+
+    const std::vector<uint8_t> replacement = {9, 8, 7};
+    const std::vector<uint8_t> appended = {6, 5};
+    const std::vector<RESEntry> wanted = {
+        {original.entries.front().name, replacement},
+        {"LOCAL:models/merge_new_1.mef", appended}
+    };
+
+    std::string err;
+    ASSERT_TRUE(RES_StreamMerge(src.string(), wanted, out.string(), err)) << err;
+
+    const RESFile result = RES_Parse(out.string());
+    ASSERT_TRUE(result.valid) << result.error;
+    ASSERT_EQ(result.entries.size(), original.entries.size() + 1);
+    EXPECT_EQ(result.entries.front().name, original.entries.front().name);
+    EXPECT_EQ(result.entries.front().data, replacement);
+    EXPECT_EQ(result.entries.back().name, "LOCAL:models/merge_new_1.mef");
+    EXPECT_EQ(result.entries.back().data, appended);
+}

@@ -20,7 +20,9 @@ private:
     void WatcherThread();
     void ProcessCommand(const DebugCommand& cmd);
     void GotoModel(const DebugCommand& cmd);
+    void SetCamera(const DebugCommand& cmd);
     void CaptureModel(const DebugCommand& cmd);
+    void CaptureSplineTrace(const DebugCommand& cmd);
     void DeleteModel(const DebugCommand& cmd);
 
     App* app_;

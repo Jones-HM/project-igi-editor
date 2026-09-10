@@ -1,21 +1,26 @@
 #include "pch.h"
 #include "renderer_splines.h"
 #include <glm/gtc/type_ptr.hpp>
-#include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
 #include <cmath>
+#include <fstream>
+#include <iomanip>
 
 void Renderer_Splines::Init() {}
 
-glm::vec3 Renderer_Splines::HermitePoint(float t,
-    const glm::vec3& p0, const glm::vec3& p1,
-    const glm::vec3& t0, const glm::vec3& t1)
-{
-    float t2 = t * t, t3 = t2 * t;
-    return (2.f*t3 - 3.f*t2 + 1.f)*p0
-         + (t3 - 2.f*t2 + t)*t0
-         + (-2.f*t3 + 3.f*t2)*p1
-         + (t3 - t2)*t1;
+namespace {
+
+glm::mat4 ToFloatMatrix(const glm::dmat4& source) {
+    glm::mat4 result(1.0f);
+    for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+            result[column][row] = static_cast<float>(source[column][row]);
+        }
+    }
+    return result;
 }
+
+} // namespace
 
 void Renderer_Splines::Draw(
     const std::vector<LevelObject>& objects,
@@ -32,11 +37,21 @@ void Renderer_Splines::Draw(
     glDisable(GL_CULL_FACE);
     glDisable(GL_BLEND);
 
+    std::vector<TraceTile> traceTiles;
+    const bool captureTrace = !pending_trace_path_.empty();
+
+    int routeIndex = 0;
     for (const auto& obj : objects) {
         if (!obj.isSplineContainer || obj.deleted) continue;
         if (Renderer_Objects::IsSkippedModelId(obj.modelId)) continue;
 
-        const auto& children = obj.childrenIndices;
+        std::vector<int> children;
+        children.reserve(obj.childrenIndices.size());
+        for (int childIndex : obj.childrenIndices) {
+            if (childIndex < 0 || childIndex >= static_cast<int>(objects.size())) continue;
+            const LevelObject& child = objects[childIndex];
+            if (!child.deleted && child.isSplineWaypoint) children.push_back(childIndex);
+        }
 
         // Find the first non-empty segmentModelId as fallback for waypoints that leave it blank.
         std::string fallbackSegmentModelId;
@@ -50,26 +65,25 @@ void Renderer_Splines::Draw(
         for (size_t i = 0; i + 1 < children.size(); ++i) {
             int si = children[i];
             int ei = children[i + 1];
-            int pi = (i > 0) ? children[i - 1] : si;
-            int ni = (i + 2 < children.size()) ? children[i + 2] : ei;
-
-            if (si < 0 || si >= (int)objects.size()) continue;
-            if (ei < 0 || ei >= (int)objects.size()) continue;
-            if (pi < 0 || pi >= (int)objects.size()) pi = si;
-            if (ni < 0 || ni >= (int)objects.size()) ni = ei;
-
-            if (objects[si].deleted || objects[ei].deleted) continue;
+            const int pi = (i > 0) ? children[i - 1] : si;
+            const int ni = (i + 2 < children.size()) ? children[i + 2] : ei;
 
             DrawSplineSegment(
                 objects[si], objects[ei],
                 objects[pi], objects[ni],
                 obj, ubo_mats, shader_program,
+                routeIndex, static_cast<int>(i), traceTiles,
                 fallbackSegmentModelId);
         }
+        ++routeIndex;
     }
 
     glDisable(GL_CULL_FACE);
     glUseProgram(0);
+    if (captureTrace) {
+        WriteTrace(pending_trace_path_, traceTiles);
+        pending_trace_path_.clear();
+    }
 }
 
 void Renderer_Splines::DrawSplineSegment(
@@ -80,6 +94,9 @@ void Renderer_Splines::DrawSplineSegment(
     const LevelObject& parent,
     GLuint ubo_mats,
     GLuint shader_program,
+    int routeIndex,
+    int intervalIndex,
+    std::vector<TraceTile>& traceTiles,
     const std::string& fallbackSegmentModelId)
 {
     const std::string& segModelId = start.segmentModelId.empty() ? fallbackSegmentModelId : start.segmentModelId;
@@ -92,82 +109,85 @@ void Renderer_Splines::DrawSplineSegment(
     GLint loc_model    = glGetUniformLocation(shader_program, "u_model");
     GLint loc_dirlight = glGetUniformLocation(shader_program, "u_dirlight");
     GLint loc_ambient  = glGetUniformLocation(shader_program, "u_ambient");
-    GLint loc_useTex   = glGetUniformLocation(shader_program, "u_useTexture");
-    GLint loc_tex      = glGetUniformLocation(shader_program, "u_texture");
+    GLint loc_useTex      = glGetUniformLocation(shader_program, "u_useTexture");
+    GLint loc_tex         = glGetUniformLocation(shader_program, "u_texture");
+    GLint loc_useLightmap = glGetUniformLocation(shader_program, "u_useLightmap");
+    GLint loc_alpha       = glGetUniformLocation(shader_program, "u_alpha");
+    GLint loc_baseColor   = glGetUniformLocation(shader_program, "u_baseColor");
+    GLint loc_tint        = glGetUniformLocation(shader_program, "u_tint");
+    GLint loc_glassMin    = glGetUniformLocation(shader_program, "u_glassMin");
 
-    glm::vec3 p0     = glm::vec3(start.pos);
-    glm::vec3 p1     = glm::vec3(end.pos);
-    glm::vec3 p_prev = glm::vec3(prev.pos);
-    glm::vec3 p_next = glm::vec3(nextNext.pos);
+    const glm::dvec3 p0 = start.pos;
+    const glm::dvec3 p1 = end.pos;
+    const glm::dvec3 pPrev = prev.pos;
+    const glm::dvec3 pNext = nextNext.pos;
 
-    glm::vec3 tan0 = (p1 - p_prev) * 0.5f;
-    glm::vec3 tan1 = (p_next - p0) * 0.5f;
+    glm::dvec3 tan0 = (p1 - pPrev) * 0.5;
+    glm::dvec3 tan1 = (pNext - p0) * 0.5;
 
     // Clamp tangent magnitude to interval length to prevent overshoot at transitions.
-    float intervalLen = glm::length(p1 - p0);
-    float t0len = glm::length(tan0);
-    float t1len = glm::length(tan1);
-    if (t0len > intervalLen) tan0 *= intervalLen / t0len;
-    if (t1len > intervalLen) tan1 *= intervalLen / t1len;
+    const double intervalLen = glm::length(p1 - p0);
+    const double t0len = glm::length(tan0);
+    const double t1len = glm::length(tan1);
+    if (t0len > intervalLen && t0len > 0.0) tan0 *= intervalLen / t0len;
+    if (t1len > intervalLen && t1len > 0.0) tan1 *= intervalLen / t1len;
 
-    // Tile geometry span in model X. minX is the model's near edge; localLen is the
-    // full X extent. A natural (unstretched) tile spans localLen * 40.96 in world units.
-    const float LENGTH_SCALE = 40.96f;
-    float minX     = mesh.center.x - mesh.halfExtents.x;
-    float localLen = mesh.halfExtents.x * 2.0f;
-    if (localLen < 1.f) localLen = 1.f;
-    float tileWorldLen = localLen * LENGTH_SCALE;
+    // The segment model's longest measured local extent is its longitudinal axis.
+    // Segment families may use either X or Y for that axis; do not assume the
+    // first model's orientation applies to every segment model.
+    const double LENGTH_SCALE = 40.96;
+    int longitudinalAxis = 0;
+    if (mesh.halfExtents.y > mesh.halfExtents.x && mesh.halfExtents.y >= mesh.halfExtents.z) {
+        longitudinalAxis = 1;
+    } else if (mesh.halfExtents.z > mesh.halfExtents.x && mesh.halfExtents.z > mesh.halfExtents.y) {
+        longitudinalAxis = 2;
+    }
+    const double localMin = static_cast<double>(mesh.center[longitudinalAxis]) -
+                            static_cast<double>(mesh.halfExtents[longitudinalAxis]);
+    const double localLen = static_cast<double>(mesh.halfExtents[longitudinalAxis]) * 2.0;
+    if (!std::isfinite(localLen) || localLen <= 1e-9) return;
 
-    // Choose the tile count that lands closest to the natural tile length, then stretch
-    // each tile in X to fill its share of the segment exactly. This guarantees tiles
-    // butt end-to-end with no gaps or overlaps (the game's "Snap Length" behavior).
-    int steps = std::max(1, (int)std::lround(intervalLen / tileWorldLen));
-    steps = std::min(steps, 64);
+    // The authored field is the number of matrices generated for each interval.
+    // A bounded fallback is used only for older data that has no authored count;
+    // it cannot silently stretch a valid authored path.
+    const int steps = parent.splineSegmentCount > 0
+        ? std::min(parent.splineSegmentCount, 4096)
+        : std::max(1, static_cast<int>(std::lround(intervalLen / (localLen * LENGTH_SCALE))));
+    if (steps <= 0) return;
 
-    const glm::vec3 worldZ(0.f, 0.f, 1.f);
+    const spline_geometry::SplineSegment segment{p0, p1, tan0, tan1, parent.linearSegments};
 
     for (int i = 0; i < steps; ++i) {
-        float ta = (float)i       / (float)steps;
-        float tb = (float)(i + 1) / (float)steps;
+        const double ta = static_cast<double>(i) / static_cast<double>(steps);
+        const double tb = static_cast<double>(i + 1) / static_cast<double>(steps);
 
         // Tile endpoints sampled on the Hermite curve. Tiles stay at their authored
         // (data) Z — the game does NOT lift track onto terrain; where the track dips
         // below the surface it is simply hidden by the terrain (e.g. track entering a
         // cutting/under a hill). Snapping to terrain wrongly exposed those buried runs.
-        glm::vec3 a = HermitePoint(ta, p0, p1, tan0, tan1);
-        glm::vec3 b = HermitePoint(tb, p0, p1, tan0, tan1);
+        const glm::dvec3 a = spline_geometry::SampleSegment(segment, ta);
+        const glm::dvec3 b = spline_geometry::SampleSegment(segment, tb);
+        const auto tile = spline_geometry::MakeAxisAlignedTile(
+            a, b, longitudinalAxis, localMin, localLen, LENGTH_SCALE);
+        if (!tile.has_value()) continue;
 
-        // Orient the tile along the chord a→b. Pitch comes from the actual placed
-        // endpoints, so the tile follows the grade and connects seamlessly to its
-        // neighbours. (Chord direction, not the instantaneous tangent, prevents the
-        // curve overshoot that made earlier builds look near-vertical.)
-        glm::vec3 chord = b - a;
-        float chordLen = glm::length(chord);
-        if (chordLen < 0.001f) continue;
-        glm::vec3 forward = chord / chordLen;
-
-        glm::vec3 right = glm::cross(worldZ, forward);
-        if (glm::length(right) < 0.001f)               // near-vertical fallback
-            right = glm::cross(glm::vec3(1.f, 0.f, 0.f), forward);
-        right = glm::normalize(right);
-        glm::vec3 up = glm::cross(forward, right);
-
-        glm::mat4 rotMat(1.f);
-        rotMat[0] = glm::vec4(forward, 0.f);           // local X → track direction
-        rotMat[1] = glm::vec4(right,   0.f);           // local Y → track width
-        rotMat[2] = glm::vec4(up,      0.f);           // local Z → track up
-
-        // Stretch X so the tile's localLen exactly covers chordLen; Y/Z keep their
-        // natural scale so the cross-section (width/height) is undistorted.
-        float sx = chordLen / localLen;
-
-        // Place so the model's near edge (local minX) lands on point a.
-        glm::vec3 pos = a - forward * (sx * minX);
-
-        glm::mat4 unscaledModel = glm::translate(glm::mat4(1.f), pos) * rotMat;
-        glm::mat4 model = glm::scale(unscaledModel, glm::vec3(sx, LENGTH_SCALE, LENGTH_SCALE));
+        const double sx = glm::length(b - a) / localLen;
+        glm::dmat4 unscaledDouble = tile->model;
+        for (int axis = 0; axis < 3; ++axis) {
+            unscaledDouble[axis] /= axis == longitudinalAxis ? sx : LENGTH_SCALE;
+        }
+        const glm::mat4 unscaledModel = ToFloatMatrix(unscaledDouble);
+        const glm::mat4 model = ToFloatMatrix(tile->model);
 
         glUniformMatrix4fv(loc_model, 1, GL_FALSE, glm::value_ptr(model));
+
+        // Spline tiles are opaque ordinary objects. Rebind every shared-object
+        // uniform that a preceding lightmapped/glass draw can change.
+        glUniform1i(loc_useLightmap, 0);
+        glUniform1f(loc_alpha, 1.0f);
+        glUniform4f(loc_baseColor, 1.0f, 1.0f, 1.0f, 1.0f);
+        glUniform3f(loc_tint, 1.0f, 1.0f, 1.0f);
+        glUniform1f(loc_glassMin, 0.0f);
 
         for (const auto& sub : mesh.subMeshes) {
             if (sub.VAO == 0 || sub.vertexCount == 0) continue;
@@ -190,14 +210,124 @@ void Renderer_Splines::DrawSplineSegment(
 
         // Rails/details (ATTA) use the same orientation and the same X stretch so they
         // stay aligned with the stretched deck tile.
+        glm::vec3 attachmentScale(static_cast<float>(LENGTH_SCALE));
+        attachmentScale[longitudinalAxis] = static_cast<float>(sx);
         obj_renderer_.DrawAttachmentsForSpline(segModelId, /*isBuilding=*/false, unscaledModel, ubo_mats,
-                                               glm::vec3(sx, LENGTH_SCALE, LENGTH_SCALE));
+                                               attachmentScale);
+
+        if (!pending_trace_path_.empty()) {
+            TraceTile trace;
+            trace.routeIndex = routeIndex;
+            trace.intervalIndex = intervalIndex;
+            trace.tileIndex = i;
+            trace.steps = steps;
+            trace.longitudinalAxis = longitudinalAxis;
+            trace.containerModelId = parent.modelId;
+            trace.containerTaskId = parent.taskId;
+            trace.segmentModelId = segModelId;
+            trace.routeBegin = p0;
+            trace.routeEnd = p1;
+            trace.tileBegin = tile->begin;
+            trace.tileEnd = tile->end;
+            trace.attachmentScale = attachmentScale;
+            trace.meshSubmeshCount = static_cast<int>(mesh.subMeshes.size());
+            trace.meshVertexCount = mesh.vertexCount;
+            for (int column = 0; column < 4; ++column) {
+                for (int row = 0; row < 4; ++row) {
+                    trace.model[static_cast<size_t>(column * 4 + row)] = tile->model[column][row];
+                    trace.unscaledModel[static_cast<size_t>(column * 4 + row)] = unscaledDouble[column][row];
+                }
+            }
+            traceTiles.push_back(std::move(trace));
+        }
         glUseProgram(shader_program);
         glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo_mats);
         glDepthFunc(GL_LESS);
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
         glDisable(GL_POLYGON_OFFSET_FILL);
+        glUniform1i(loc_useLightmap, 0);
+        glUniform1f(loc_alpha, 1.0f);
+        glUniform4f(loc_baseColor, 1.0f, 1.0f, 1.0f, 1.0f);
+        glUniform3f(loc_tint, 1.0f, 1.0f, 1.0f);
+        glUniform1f(loc_glassMin, 0.0f);
     }
+}
+
+namespace {
+
+void WriteTraceNumber(std::ostream& output, double value) {
+    output << std::setprecision(17) << value;
+}
+
+void WriteTraceVec3(std::ostream& output, const glm::dvec3& value) {
+    output << '[';
+    WriteTraceNumber(output, value.x); output << ',';
+    WriteTraceNumber(output, value.y); output << ',';
+    WriteTraceNumber(output, value.z); output << ']';
+}
+
+void WriteTraceString(std::ostream& output, const std::string& value) {
+    output << '"';
+    for (const char c : value) {
+        if (c == '"') output << "\\\"";
+        else if (c == '\\') output << "\\\\";
+        else if (c == '\n') output << "\\n";
+        else if (c == '\r') output << "\\r";
+        else output << c;
+    }
+    output << '"';
+}
+
+void WriteTraceMatrix(std::ostream& output, const std::array<double, 16>& matrix) {
+    output << '[';
+    for (size_t i = 0; i < matrix.size(); ++i) {
+        if (i != 0) output << ',';
+        WriteTraceNumber(output, matrix[i]);
+    }
+    output << ']';
+}
+
+} // namespace
+
+void Renderer_Splines::WriteTrace(const std::string& path, const std::vector<TraceTile>& traceTiles) {
+    std::ofstream output(path, std::ios::trunc);
+    if (!output.is_open()) return;
+
+    output << "{\"schemaVersion\":1,\"tileCount\":" << traceTiles.size() << ",\"tiles\":[";
+    for (size_t i = 0; i < traceTiles.size(); ++i) {
+        if (i != 0) output << ',';
+        const TraceTile& tile = traceTiles[i];
+        output << "{\"routeIndex\":" << tile.routeIndex
+               << ",\"intervalIndex\":" << tile.intervalIndex
+               << ",\"tileIndex\":" << tile.tileIndex
+               << ",\"steps\":" << tile.steps
+               << ",\"longitudinalAxis\":" << tile.longitudinalAxis
+               << ",\"containerModelId\":";
+        WriteTraceString(output, tile.containerModelId);
+        output << ",\"containerTaskId\":";
+        WriteTraceString(output, tile.containerTaskId);
+        output << ",\"segmentModelId\":";
+        WriteTraceString(output, tile.segmentModelId);
+        output << ",\"routeBegin\":";
+        WriteTraceVec3(output, tile.routeBegin);
+        output << ",\"routeEnd\":";
+        WriteTraceVec3(output, tile.routeEnd);
+        output << ",\"tileBegin\":";
+        WriteTraceVec3(output, tile.tileBegin);
+        output << ",\"tileEnd\":";
+        WriteTraceVec3(output, tile.tileEnd);
+        output << ",\"model\":";
+        WriteTraceMatrix(output, tile.model);
+        output << ",\"unscaledModel\":";
+        WriteTraceMatrix(output, tile.unscaledModel);
+        output << ",\"attachmentScale\":[";
+        WriteTraceNumber(output, tile.attachmentScale.x); output << ',';
+        WriteTraceNumber(output, tile.attachmentScale.y); output << ',';
+        WriteTraceNumber(output, tile.attachmentScale.z); output << ']';
+        output << ",\"meshSubmeshCount\":" << tile.meshSubmeshCount
+               << ",\"meshVertexCount\":" << tile.meshVertexCount << '}';
+    }
+    output << "]}";
 }
 

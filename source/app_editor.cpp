@@ -852,6 +852,8 @@ void App::CommitPropTextEdit() {
 		}
 	}
 
+	const int selectedModelSource = is_model_field ? pending_model_source_level_ : 0;
+	if (is_model_field) pending_model_source_level_ = 0;
 	if (is_model_field && !obj.modelId.empty()) {
 		if (!level_res_models_.Empty() && !level_res_models_.Contains(obj.modelId)) {
 			obj.modelMissingInRes = true;
@@ -862,7 +864,7 @@ void App::CommitPropTextEdit() {
 				int pct = total ? (int)(done * 100 / total) : 0;
 				DrawProgressOverlay(("Adding '" + addId + "' to .res").c_str(), pct, "packing textures");
 			};
-			if (renderer_.AddModelToLevelRes(addId, progressCb)) {
+			if (renderer_.AddModelToLevelRes(addId, progressCb, selectedModelSource)) {
 				level_res_models_.AddEntry("models\\" + addId + ".mef");
 				obj.modelMissingInRes = false;
 				std::string fam = addId.substr(0, addId.find('_'));
@@ -956,15 +958,28 @@ void App::SyncGraphOverlayOffsetFromAIGraph() {
 }
 
 void App::RebuildLevelModelIds() {
-	level_model_ids_.clear();
+	level_model_entries_.clear();
 	level_.GetLevelObjects().LoadModelNames();
+	std::map<std::string, std::set<int>> sourceLevels;
+	for (const auto& source : renderer_.GetModelTextureSources()) {
+		if (source.level > 0) sourceLevels[source.modelId].insert(source.level);
+	}
 	for (const auto& pair : level_.GetLevelObjects().GetModelNamesMap()) {
 		const std::string& m = pair.first;
 		bool ok = m.size() >= 7;
 		if (ok) {
 			for (char c : m) if (!isdigit(c) && c != '_') { ok = false; break; }
 		}
-		if (ok) level_model_ids_.insert(m);
+		if (!ok) continue;
+		const auto found = sourceLevels.find(m);
+		if (found == sourceLevels.end()) {
+			level_model_entries_.push_back({m, 0, m});
+			continue;
+		}
+		for (int levelNo : found->second) {
+			level_model_entries_.push_back(
+				{m, levelNo, m + "  [Level " + std::to_string(levelNo) + "]"});
+		}
 	}
 }
 

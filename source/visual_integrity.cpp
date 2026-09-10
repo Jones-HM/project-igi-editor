@@ -133,7 +133,8 @@ const char* FindingSeverity(const VisualIntegrityFinding& finding) {
     // little projected/temporal data to make a deterministic decision.
     if (finding.rule == "occluded-part" ||
         finding.rule == "insufficient-projection" ||
-        finding.rule == "temporal-evidence") {
+        finding.rule == "temporal-evidence" ||
+        finding.rule == "projection-evidence") {
         return "warning";
     }
     return "error";
@@ -346,6 +347,11 @@ VisualIntegrityResult EvaluateVisualIntegrity(const VisualIntegrityInput& input)
 
     if (!has_valid_view) return result;
     result.partsExpected = static_cast<int>(input.expectedPartIds.size());
+    if (!has_projection_evidence && !input.expectedParts.empty()) {
+        AddFinding(result, "projection-evidence", -1, "", 0, 1,
+                   "substantive geometry inventory has no view with a matching rendered-frame projection");
+        has_inconclusive_evidence = true;
+    }
     auto evidence_for_part = [&](int part_id) -> const VisualIntegrityView* {
         for (const VisualIntegrityView& view : input.views) {
             if (HasExpectedSize(view) &&

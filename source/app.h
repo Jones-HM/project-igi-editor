@@ -420,6 +420,7 @@ private:
   int model_picker_selected_ = 0;
   int model_picker_scroll_ = 0;
   std::string model_picker_filter_;
+  int pending_model_source_level_ = 0;
 
   // AutoComplete inline keywords (Ctrl+Space)
   std::vector<std::string> autocomplete_keywords_;
@@ -432,7 +433,7 @@ private:
 
   // All modelIds from current level objects in XXX_XX_X format (for model
   // picker)
-  std::set<std::string> level_model_ids_;
+  std::vector<ModelPickerEntry> level_model_entries_;
 
   bool sync_from_game_once_;
   int last_game_level_;

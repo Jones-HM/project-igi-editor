@@ -163,6 +163,26 @@ TEST(VisualIntegrityTest, DoesNotRejectSkinnedFrameFromStaticDiagnosticProjectio
     EXPECT_FALSE(HasRule(result, "silhouette-hole"));
 }
 
+TEST(VisualIntegrityTest, DoesNotPassSubstantiveInventoryWithoutProjectionEvidence) {
+    auto view = MakeView({1, 1, 1, 1,
+                          1, 1, 1, 1,
+                          1, 1, 1, 1,
+                          1, 1, 1, 1});
+    view.geometryProjectionMatchesRenderedFrame = false;
+
+    igi::VisualIntegrityPart part;
+    part.id = 1;
+    part.vertexCount = 4;
+    part.triangleCount = 2;
+
+    auto input = MakeInput({1}, {view});
+    input.expectedParts = {part};
+    const auto result = igi::EvaluateVisualIntegrity(input);
+
+    EXPECT_EQ(result.status, igi::VisualIntegrityStatus::kInconclusive);
+    EXPECT_TRUE(HasRule(result, "projection-evidence"));
+}
+
 TEST(VisualIntegrityTest, DuplicateExpectedPartIdCannotPass) {
     const auto result = igi::EvaluateVisualIntegrity(MakeInput({1, 1}, {MakeView(std::vector<int>(16, 1))}));
     EXPECT_EQ(result.status, igi::VisualIntegrityStatus::kFail);

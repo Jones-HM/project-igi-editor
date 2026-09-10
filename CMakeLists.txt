@@ -292,6 +292,8 @@ add_executable(igi_tests
     tests/test_mission_expression.cpp
     tests/test_mission_state.cpp
     tests/test_level_weather.cpp
+    tests/test_model_texture_resolution.cpp
+    tests/test_spline_geometry.cpp
 )
 
 # Explicit runtime so igi_tests always matches igi-editor (/MDd Debug, /MD Release).
@@ -361,6 +363,8 @@ target_sources(igi_tests PRIVATE
     source/renderer/res_compiler.cpp
     source/level/res_model_set.cpp
     source/renderer/tex_writer.cpp
+    source/renderer/model_texture_resolution.cpp
+    source/renderer/spline_geometry.cpp
     source/level/mtp_writer.cpp
     source/renderer/fnt_parser.cpp
     source/level/terrain_files.cpp

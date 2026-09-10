@@ -25,3 +25,12 @@ bool RES_StreamAppend(const std::string& srcResPath,
                       const std::string& outPath,
                       std::string& error,
                       const std::function<void(size_t,size_t)>& onProgress = nullptr);
+
+// Stream `srcResPath` to `outPath`, replacing entries whose names match the
+// supplied entries case-insensitively and appending supplied entries absent
+// from the source. The source is never modified.
+bool RES_StreamMerge(const std::string& srcResPath,
+                     const std::vector<RESEntry>& entries,
+                     const std::string& outPath,
+                     std::string& error,
+                     const std::function<void(size_t,size_t)>& onProgress = nullptr);
