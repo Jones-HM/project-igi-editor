@@ -1,5 +1,45 @@
 # Changelogs
 
+## 3.6.10-pre — Fonts, Menu, Sniper/AI, and Foreign Model Fixes
+
+### Game fonts and menu
+
+- Fixed editor font loading and fallback behavior so game/editor fonts remain
+  available across startup and level changes.
+- Restored retail-style pause-menu font rendering and corrected menu layout,
+  hit testing, modal input, and spinner alignment.
+- Fixed menu save/autosave interactions so active property edits are committed
+  before save operations.
+
+### Sniper and AI rendering
+
+- Fixed AI/sniper model pose rendering by supporting skinned replacement meshes,
+  authored AI rotations, recursive AI task discovery, and related graph targets.
+- Added safer animation fallback and per-AI playback controls so eligible AI do
+  not remain static when a stand animation is absent.
+- Preserved task-ID and AI-script resolution rules while adding regression
+  coverage for nested HumanAI and animation paths.
+
+### Models, textures, and editor stability
+
+- Fixed cross-level model and texture resolution, including ATTA dependencies
+  and stale archive-index behavior.
+- Added exact source-level provenance for foreign model imports and rejected
+  ambiguous automatic source selection.
+- Added staged RES/DAT/MTP publication, differing-entry replacement, material
+  slot validation, and rollback-safe import checks.
+- Hardened OpenGL buffer-state cleanup, F11 framing, visual-integrity evidence,
+  weather/loading behavior, and large-level lightmap handling.
+
+### Verification and packaging
+
+- Added focused model-source and spline regression tests plus disposable WMI
+  Session 1 E2E hash/mutation checks.
+- Release candidate binary ZIP includes `igi1ed.exe`, test binary, runtime DLLs,
+  configuration, version metadata, and SHA-256 manifest.
+- Known release gates and the complete future-fix procedure are recorded in
+  [`docs/ISSUE_FIXES.md`](docs/ISSUE_FIXES.md).
+
 ## Unreleased — Foreign model source provenance
 
 - Added exact source-level provenance for cross-level model imports.
