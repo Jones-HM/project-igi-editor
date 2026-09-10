@@ -855,7 +855,11 @@ void App::CommitPropTextEdit() {
 	const int selectedModelSource = is_model_field ? pending_model_source_level_ : 0;
 	if (is_model_field) pending_model_source_level_ = 0;
 	if (is_model_field && !obj.modelId.empty()) {
-		if (!level_res_models_.Empty() && !level_res_models_.Contains(obj.modelId)) {
+		const bool destinationInventoryLoaded = !level_res_models_.Empty();
+		const bool destinationContainsModel = destinationInventoryLoaded &&
+			level_res_models_.Contains(obj.modelId);
+		if (ModelSourceRequiresImport(destinationInventoryLoaded, destinationContainsModel,
+			level_.GetLevelNo(), selectedModelSource)) {
 			obj.modelMissingInRes = true;
 			// Auto-add the foreign model immediately — no extra keypress needed.
 			std::string addId = obj.modelId;
@@ -881,6 +885,10 @@ void App::CommitPropTextEdit() {
 		// (the load is otherwise lazy in Draw → looks like a hang). (user feedback)
 		DrawProgressOverlay(("Loading model '" + obj.modelId + "'").c_str(), 40, "mesh & textures");
 		renderer_.PreloadModel(obj.modelId, obj.isBuilding);
+		// A model apply is a rare user-visible action: flush its import/load
+		// evidence to disk now so live log assertions (and crash diagnostics)
+		// never sit in the logger's userspace buffer.
+		Logger::Get().Flush();
 	}
 
 	obj.modified = true;
@@ -981,6 +989,10 @@ void App::RebuildLevelModelIds() {
 				{m, levelNo, m + "  [Level " + std::to_string(levelNo) + "]"});
 		}
 	}
+	// One row per unique model ID: duplicate source rows only confuse Up/Down
+	// preview navigation, while the kept row still carries the deterministic
+	// import source level used by Enter.
+	level_model_entries_ = DedupeModelPickerEntries(level_model_entries_, level_.GetLevelNo());
 }
 
 void App::Undo() {

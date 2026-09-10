@@ -77,23 +77,15 @@ void App::Input_OnSpecial(int key, int x, int y) {
 
 	// Model picker navigation
 	if (model_picker_open_) {
-		std::vector<ModelPickerEntry> filtered;
-		std::string fl = model_picker_filter_;
-		std::transform(fl.begin(), fl.end(), fl.begin(), [](unsigned char c){ return std::tolower(c); });
-		for (const auto& entry : level_model_entries_) {
-			if (fl.empty()) { filtered.push_back(entry); }
-			else {
-				std::string idl = entry.label;
-				std::transform(idl.begin(), idl.end(), idl.begin(), [](unsigned char c){ return std::tolower(c); });
-				if (idl.find(fl) != std::string::npos) filtered.push_back(entry);
-			}
-		}
+		const auto filtered = FilterModelPickerEntries(level_model_entries_, model_picker_filter_);
 		int count = (int)filtered.size();
 		if (count > 0) {
-			if (key == GLUT_KEY_UP)        model_picker_selected_ = std::max(0, model_picker_selected_ - 1);
-			else if (key == GLUT_KEY_DOWN) model_picker_selected_ = std::min(count - 1, model_picker_selected_ + 1);
-			else if (key == GLUT_KEY_PAGE_UP)   model_picker_selected_ = std::max(0, model_picker_selected_ - 10);
-			else if (key == GLUT_KEY_PAGE_DOWN) model_picker_selected_ = std::min(count - 1, model_picker_selected_ + 10);
+			// One row per unique model ID, so Up/Down steps change the
+			// previewed model directly.
+			if (key == GLUT_KEY_UP)        model_picker_selected_ = MoveModelPickerSelection(model_picker_selected_, count, -1);
+			else if (key == GLUT_KEY_DOWN) model_picker_selected_ = MoveModelPickerSelection(model_picker_selected_, count, 1);
+			else if (key == GLUT_KEY_PAGE_UP)   model_picker_selected_ = MoveModelPickerSelection(model_picker_selected_, count, -10);
+			else if (key == GLUT_KEY_PAGE_DOWN) model_picker_selected_ = MoveModelPickerSelection(model_picker_selected_, count, 10);
 			const int row_h = CurrentUiRowHeight(), panel_h = window_state_.viewport_height_ - 100;
 			const int max_vis = std::max(1, panel_h / row_h);
 			if (model_picker_selected_ < model_picker_scroll_)
@@ -1000,25 +992,14 @@ void App::Input_OnKeyboard(unsigned char key, int x, int y) {
 	if (model_picker_open_) {
 		if (key == 27) { model_picker_open_ = false; return; }
 		if (key == 13) {
-			std::vector<ModelPickerEntry> filtered;
-			std::string fl = model_picker_filter_;
-			std::transform(fl.begin(), fl.end(), fl.begin(), [](unsigned char c){ return std::tolower(c); });
-			for (const auto& entry : level_model_entries_) {
-				if (fl.empty()) { filtered.push_back(entry); }
-				else {
-					std::string idl = entry.label;
-					std::transform(idl.begin(), idl.end(), idl.begin(), [](unsigned char c){ return std::tolower(c); });
-					if (idl.find(fl) != std::string::npos) filtered.push_back(entry);
-				}
-			}
+			const auto commit = ResolveModelPickerCommit(level_model_entries_, model_picker_filter_, model_picker_selected_);
 			model_picker_open_ = false;
 			// Restore the field captured when the picker opened, so the choice lands in
 			// the exact text box the cursor was in (even if focus changed meanwhile).
 			if (picker_target_field_ >= 0) { prop_text_edit_field_ = picker_target_field_; prop_edit_obj_index_ = picker_target_obj_; }
-			if (prop_text_edit_field_ >= 0 && model_picker_selected_ < (int)filtered.size()) {
-				const auto& chosen = filtered[model_picker_selected_];
-				prop_text_buf_ = chosen.modelId;
-				pending_model_source_level_ = chosen.sourceLevel;
+			if (prop_text_edit_field_ >= 0 && commit.has_value()) {
+				prop_text_buf_ = commit->modelId;
+				pending_model_source_level_ = commit->sourceLevel;
 				prop_text_caret_ = (int)prop_text_buf_.size();
 				CommitPropTextEdit();              // apply the chosen model to the field
 			}

@@ -2985,18 +2985,9 @@ void Renderer::Draw(const draw_params_s &params,
       int vw = params.view_define_->viewport_width_;
       int vh = params.view_define_->viewport_height_;
       const int pw = 280, px = vw - pw;
-      // Build filtered sorted list
-      std::vector<ModelPickerEntry> filtered;
-      std::string fl = task_tree_view.model_picker_filter_;
-      std::transform(fl.begin(), fl.end(), fl.begin(), [](unsigned char c){ return std::tolower(c); });
-      for (const auto& entry : *task_tree_view.model_entries_) {
-        if (fl.empty()) { filtered.push_back(entry); }
-        else {
-          std::string idl = entry.label;
-          std::transform(idl.begin(), idl.end(), idl.begin(), [](unsigned char c){ return std::tolower(c); });
-          if (idl.find(fl) != std::string::npos) filtered.push_back(entry);
-        }
-      }
+      // Build the same filtered list used by keyboard and mouse input.
+      const auto filtered = FilterModelPickerEntries(
+          *task_tree_view.model_entries_, task_tree_view.model_picker_filter_);
       int count = (int)filtered.size();
       const int row_h = uiFontMetrics.rowHeight, hdr_h = 50, ftr_h = 20;
       int body_h = vh - hdr_h - ftr_h;

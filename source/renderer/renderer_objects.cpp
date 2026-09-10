@@ -448,9 +448,18 @@ std::vector<uint8_t> Renderer_Objects::FindTextureData(const std::string& textur
 
 std::vector<uint8_t> Renderer_Objects::FindTextureDataFromLevel(
     const std::string& textureId, int levelNo) const {
-    const std::string levelRes = Utils::GetIGIRootPath() +
+    const std::string igiRoot = Utils::GetIGIRootPath();
+    const std::string levelRes = igiRoot +
         "\\missions\\location0\\level" + std::to_string(levelNo) +
         "\\textures\\level" + std::to_string(levelNo) + ".res";
+    // Source textures that are shared across levels live in the common
+    // archive, not in any level archive (e.g. several 001_02_1 textures are
+    // only in location0.res). Without this second bundle entry, a lookup for
+    // such a texture misses its own source level and falls through to
+    // same-name bytes from an unrelated level's archive.
+    const std::string commonRes = igiRoot +
+        "\\missions\\location0\\common\\textures\\location0.res";
+    const std::string bundleRes[2] = { levelRes, commonRes };
     auto equalsCI = [](const std::string& a, const std::string& b) {
         if (a.size() != b.size()) return false;
         for (size_t i = 0; i < a.size(); ++i) {
@@ -459,25 +468,20 @@ std::vector<uint8_t> Renderer_Objects::FindTextureDataFromLevel(
         }
         return true;
     };
-    auto readFromIndex = [&](const ResIndex& index, const std::string& id) -> std::vector<uint8_t> {
-        const std::string entryName = id + ".tex";
-        for (const auto& item : index.index) {
-            if (equalsCI(item.first, entryName))
-                return RES_ReadEntry(index.res_path, item.second);
-        }
-        return {};
-    };
-    for (const auto& index : res_tex_indexes_) {
-        if (!equalsCI(index.res_path, levelRes)) continue;
-        auto bytes = readFromIndex(index, textureId);
-        if (!bytes.empty()) return bytes;
-        const std::string stripped = StripTextureFormatSuffix(textureId);
-        if (stripped != textureId) {
-            bytes = readFromIndex(index, stripped);
-            if (!bytes.empty()) return bytes;
+    // Level-specific comes first so it wins over common on name collisions.
+    std::array<ModelSourceArchiveIndex, 2> bundle;
+    for (size_t slot = 0; slot < 2; ++slot) {
+        bundle[slot].resPath = bundleRes[slot];
+        for (const auto& index : res_tex_indexes_) {
+            if (!equalsCI(index.res_path, bundleRes[slot])) continue;
+            bundle[slot].entries = index.index;
+            break;
         }
     }
-    return {};
+    return FindModelSourceEntry(bundle, textureId, true,
+        [](const std::string& resPath, const ResEntryInfo& info) {
+            return RES_ReadEntry(resPath, info);
+        });
 }
 
 // Try to find mesh bytes in the in-memory .res index.
@@ -493,10 +497,16 @@ std::vector<uint8_t> Renderer_Objects::FindMeshData(const std::string& modelId) 
 
 std::vector<uint8_t> Renderer_Objects::FindMeshDataFromLevel(
     const std::string& modelId, int levelNo) const {
-    const std::string levelRes = Utils::GetIGIRootPath() +
+    const std::string igiRoot = Utils::GetIGIRootPath();
+    const std::string levelRes = igiRoot +
         "\\missions\\location0\\level" + std::to_string(levelNo) +
         "\\models\\level" + std::to_string(levelNo) + ".res";
-    const std::string fname = modelId + ".mef";
+    // Shared models live in the common archive; without it a source-level
+    // mesh lookup misses and falls through to a same-name mesh from an
+    // unrelated level's archive.
+    const std::string commonRes = igiRoot +
+        "\\missions\\location0\\common\\models\\location0.res";
+    const std::string bundleRes[2] = { levelRes, commonRes };
     auto equalsCI = [](const std::string& a, const std::string& b) {
         if (a.size() != b.size()) return false;
         for (size_t i = 0; i < a.size(); ++i) {
@@ -505,14 +515,20 @@ std::vector<uint8_t> Renderer_Objects::FindMeshDataFromLevel(
         }
         return true;
     };
-    for (const auto& index : res_model_indexes_) {
-        if (!equalsCI(index.res_path, levelRes)) continue;
-        for (const auto& item : index.index) {
-            if (equalsCI(item.first, fname))
-                return RES_ReadEntry(index.res_path, item.second);
+    // Level-specific comes first so it wins over common on name collisions.
+    std::array<ModelSourceArchiveIndex, 2> bundle;
+    for (size_t slot = 0; slot < 2; ++slot) {
+        bundle[slot].resPath = bundleRes[slot];
+        for (const auto& index : res_model_indexes_) {
+            if (!equalsCI(index.res_path, bundleRes[slot])) continue;
+            bundle[slot].entries = index.index;
+            break;
         }
     }
-    return {};
+    return FindModelSourceEntry(bundle, modelId, false,
+        [](const std::string& resPath, const ResEntryInfo& info) {
+            return RES_ReadEntry(resPath, info);
+        });
 }
 
 // Free every baked lightmap's GL textures and drop the per-task bake state.

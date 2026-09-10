@@ -131,10 +131,16 @@ static bool AddEntriesToRes(const std::string& resPath,
                             std::string& err,
                             const std::function<void(size_t,size_t)>& onProgress = nullptr,
                             bool replaceExisting = false) {
-    auto equalsCI = [](const std::string& a, const std::string& b) {
-        if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); ++i)
-            if (std::tolower((unsigned char)a[i]) != std::tolower((unsigned char)b[i])) return false;
+    auto equalsResourceCI = [](const std::string& a, const std::string& b) {
+        const auto leaf = [](const std::string& value) {
+            const size_t slash = value.find_last_of("\\/");
+            return slash == std::string::npos ? value : value.substr(slash + 1);
+        };
+        const std::string aLeaf = leaf(a);
+        const std::string bLeaf = leaf(b);
+        if (aLeaf.size() != bLeaf.size()) return false;
+        for (size_t i = 0; i < aLeaf.size(); ++i)
+            if (std::tolower((unsigned char)aLeaf[i]) != std::tolower((unsigned char)bLeaf[i])) return false;
         return true;
     };
 
@@ -145,7 +151,7 @@ static bool AddEntriesToRes(const std::string& resPath,
     if (!RES_ForEachEntry(resPath,
             [&](const std::string& name, const uint8_t* data, size_t size) {
                 for (size_t i = 0; i < wanted.size(); ++i) {
-                    if (!equalsCI(name, wanted[i].name)) continue;
+                    if (!equalsResourceCI(name, wanted[i].name)) continue;
                     present[i] = true;
                     if (size != wanted[i].data.size() ||
                         !std::equal(data, data + size, wanted[i].data.begin())) {
@@ -793,8 +799,29 @@ bool Renderer_Objects::AddModelToLevelRes(const std::string& modelId,
         const auto texs = familyTextureIds.at(fm.first);
         global_texture_map_[fm.first] = texs;
         model_level_map_[fm.first] = current_level_;
+        // The exact-source resolver reads texture_sources_, so it must see
+        // the just-published destination bundle. Otherwise a later import in
+        // the same session would resolve this model to its stale pre-import
+        // mapping and pack textures from the wrong level's archive.
+        bool sourceUpdated = false;
+        for (auto& source : texture_sources_) {
+            if (source.level == current_level_ && source.modelId == fm.first) {
+                source.textures = texs;
+                sourceUpdated = true;
+                break;
+            }
+        }
+        if (!sourceUpdated) {
+            texture_sources_.push_back(ModelTextureSource{current_level_, fm.first, texs});
+        }
         for (const auto& t : texs) {
             texture_level_map_[t] = current_level_;
+			const std::string textureCacheKey = std::to_string(current_level_) + ":" + t;
+			auto cachedTexture = texture_cache_.find(textureCacheKey);
+			if (cachedTexture != texture_cache_.end()) {
+				if (cachedTexture->second != 0) glDeleteTextures(1, &cachedTexture->second);
+				texture_cache_.erase(cachedTexture);
+			}
         }
         mesh_cache_.erase(std::to_string(current_level_) + ":object:" + fm.first);
         mesh_cache_.erase(std::to_string(current_level_) + ":building:" + fm.first);
@@ -803,6 +830,9 @@ bool Renderer_Objects::AddModelToLevelRes(const std::string& modelId,
 
     Logger::Get().Log(LogLevel::INFO, "[Renderer] AddModelToLevelRes: packed family '" + prefix + "' = " +
         std::to_string(modelEntries.size()) + " model(s) + " + std::to_string(texAdded) + " texture(s)");
+    // A completed import is rare and its evidence is asserted by live tests:
+    // flush now rather than leaving it in the logger's userspace buffer.
+    Logger::Get().Flush();
     return true;
 }
 

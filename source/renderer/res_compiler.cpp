@@ -330,11 +330,17 @@ bool RES_StreamMerge(const std::string& srcResPath,
         return false;
     }
 
-    auto equalsCI = [](const std::string& a, const std::string& b) {
-        if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); ++i) {
-            if (std::tolower(static_cast<unsigned char>(a[i])) !=
-                std::tolower(static_cast<unsigned char>(b[i]))) return false;
+    auto equalsResourceCI = [](const std::string& a, const std::string& b) {
+        const auto leaf = [](const std::string& value) {
+            const size_t slash = value.find_last_of("\\/");
+            return slash == std::string::npos ? value : value.substr(slash + 1);
+        };
+        const std::string aLeaf = leaf(a);
+        const std::string bLeaf = leaf(b);
+        if (aLeaf.size() != bLeaf.size()) return false;
+        for (size_t i = 0; i < aLeaf.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(aLeaf[i])) !=
+                std::tolower(static_cast<unsigned char>(bLeaf[i]))) return false;
         }
         return true;
     };
@@ -346,7 +352,7 @@ bool RES_StreamMerge(const std::string& srcResPath,
             [&](const std::string& name, const uint8_t*, size_t) {
                 ++sourceCount;
                 for (size_t i = 0; i < entries.size(); ++i) {
-                    if (equalsCI(name, entries[i].name)) present[i] = true;
+                    if (equalsResourceCI(name, entries[i].name)) present[i] = true;
                 }
             }, ferr)) {
         error = "could not read source archive: " + ferr;
@@ -376,7 +382,7 @@ bool RES_StreamMerge(const std::string& srcResPath,
                 if (streamFailed) return;
                 size_t replacement = entries.size();
                 for (size_t i = 0; i < entries.size(); ++i) {
-                    if (equalsCI(name, entries[i].name)) {
+                    if (equalsResourceCI(name, entries[i].name)) {
                         replacement = i;
                         break;
                     }

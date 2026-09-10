@@ -128,6 +128,7 @@ function Validate-Step($Step, [string]$ScenarioName, [int]$Index, [string]$Root)
         'launch_editor' {
             Assert-Integer (Get-Property $Step 'level') "$ScenarioName/$id level" 1 14
             if ($null -ne (Get-Property $Step 'drawParts')) { Assert-Integer (Get-Property $Step 'drawParts') "$ScenarioName/$id drawParts" -2 127 }
+            if ($null -ne (Get-Property $Step 'developerMode') -and (Get-Property $Step 'developerMode') -isnot [bool]) { Fail "$ScenarioName/$id developerMode must be boolean." }
         }
         'wait_for_window' { if ($null -ne (Get-Property $Step 'timeoutSeconds')) { Assert-Integer (Get-Property $Step 'timeoutSeconds') "$ScenarioName/$id timeoutSeconds" 1 300 } }
         'wait_for_log' { if ([string]::IsNullOrWhiteSpace([string](Get-Property $Step 'pattern'))) { Fail "$ScenarioName/$id requires pattern." } }
@@ -941,6 +942,10 @@ function Invoke-Scenario($Scenario, [string]$Root, [string]$Editor, [string]$Out
                         $wmi = [wmiclass]'\\.\root\cimv2:Win32_Process'
                         $command = '"' + $Editor + '" --game-path "' + $Root + '" -level ' + $level
                         if ($null -ne $step.drawParts) { $command += ' -draw_parts ' + [int]$step.drawParts }
+                        # Diagnostic sessions need load-time log evidence: developer
+                        # mode forces INFO logging in-memory only, without
+                        # touching the authored qedconfig.
+                        if ($step.developerMode -eq $true) { $command += ' --developer-mode' }
                         $created = $wmi.Create($command, $Root)
                         if ([int]$created.ReturnValue -ne 0) { Fail "WMI launch failed with return code $($created.ReturnValue)." }
                         $process = Wait-ForEditor ([int]$created.ProcessId) 45

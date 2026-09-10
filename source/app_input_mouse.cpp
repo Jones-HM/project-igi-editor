@@ -634,6 +634,23 @@ else if (btn_hit2(MODE_ROW))   { ToggleGamePlayMode(); TogglePauseMenu(); }
 				}
 			}
 
+			// Model picker mouse click: keep the selected index in the same filtered
+			// list that Enter will commit. Consume the whole panel so a click cannot
+			// select or manipulate a background object while the picker is open.
+			if (model_picker_open_) {
+				const int picker_w = 280;
+				const int picker_x = window_state_.viewport_width_ - picker_w;
+				if (x >= picker_x && x <= window_state_.viewport_width_) {
+					const int selected = ModelPickerSelectionAt(
+						level_model_entries_, model_picker_filter_, x, y,
+						window_state_.viewport_width_, window_state_.viewport_height_,
+						model_picker_scroll_, CurrentUiRowHeight());
+					if (selected >= 0) model_picker_selected_ = selected;
+					mouse_state_.left_button_down_ = false;
+					return;
+				}
+			}
+
 			// Priority: TreeView HUD interaction
 			if (show_hud_ && x < 350 && !enableCameraMode) { // Tree is on the left
 				ProcessTreeViewClick(x, y);

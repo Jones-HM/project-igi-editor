@@ -77,13 +77,8 @@ Mesh BuildMeshFromGeometry(const ParsedGeometry& geometry, const std::string& fi
                 verts.push_back(n.y);
                 verts.push_back(n.z);
 
-                // UV convention: MEF files store UVs in image-space (V=0 at
-                // top), OpenGL uses V=0 at the bottom. Flip V only — flipping
-                // U as well (the previous commit's `1.0f - src.uv.x`) caused
-                // the fallback `buildSubMesh` path to mirror the texture
-                // horizontally, which disagreed with the renderBlocks path
-                // at line 186 and produced sideways / double-flipped textures
-                // on models that fell through to this fallback.
+                // MEF UVs use image-space V; the OpenGL texture upload uses the
+                // opposite origin, so flip V at the model sampling boundary.
                 verts.push_back(src.uv.x);
                 verts.push_back(1.0f - src.uv.y);
                 verts.push_back(geometry.modelType == 3 ? src.uv2.x : 0.0f);
