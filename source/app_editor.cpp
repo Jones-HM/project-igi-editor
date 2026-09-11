@@ -855,29 +855,33 @@ void App::CommitPropTextEdit() {
 	const int selectedModelSource = is_model_field ? pending_model_source_level_ : 0;
 	if (is_model_field) pending_model_source_level_ = 0;
 	if (is_model_field && !obj.modelId.empty()) {
-		const bool destinationInventoryLoaded = !level_res_models_.Empty();
-		const bool destinationContainsModel = destinationInventoryLoaded &&
-			level_res_models_.Contains(obj.modelId);
-		if (ModelSourceRequiresImport(destinationInventoryLoaded, destinationContainsModel,
-			level_.GetLevelNo(), selectedModelSource)) {
-			obj.modelMissingInRes = true;
-			// Auto-add the foreign model immediately — no extra keypress needed.
-			std::string addId = obj.modelId;
-			DrawProgressOverlay(("Adding '" + addId + "' to .res").c_str(), 0, "starting");
-			auto progressCb = [this, addId](size_t done, size_t total) {
-				int pct = total ? (int)(done * 100 / total) : 0;
-				DrawProgressOverlay(("Adding '" + addId + "' to .res").c_str(), pct, "packing textures");
-			};
-			if (renderer_.AddModelToLevelRes(addId, progressCb, selectedModelSource)) {
-				level_res_models_.AddEntry("models\\" + addId + ".mef");
-				obj.modelMissingInRes = false;
-				std::string fam = addId.substr(0, addId.find('_'));
-				status_message_ = "Added model family '" + fam + "' (+textures) to .res/.dat/.mtp.";
-			} else {
-				status_message_ = "Failed to add '" + addId + "' to level .res (see log).";
-			}
-		} else {
+		// An explicit model-field commit (Enter) IS the import request: never skip
+		// it just because the destination inventory already lists the model —
+		// level archives can carry stale/polluted bytes for a same-name model
+		// (e.g. 001_02_1 natively present in level 12). The staged replace path
+		// skips byte-identical entries, so refreshing a natively-present model
+		// with matching bytes is a safe no-op.
+		obj.modelMissingInRes = true;
+		// Auto-add the foreign model immediately — no extra keypress needed.
+		std::string addId = obj.modelId;
+		DrawProgressOverlay(("Adding '" + addId + "' to .res").c_str(), 0, "starting");
+		auto progressCb = [this, addId](size_t done, size_t total) {
+			int pct = total ? (int)(done * 100 / total) : 0;
+			DrawProgressOverlay(("Adding '" + addId + "' to .res").c_str(), pct, "packing textures");
+		};
+		if (renderer_.AddModelToLevelRes(addId, progressCb, selectedModelSource)) {
+			level_res_models_.AddEntry("models\\" + addId + ".mef");
 			obj.modelMissingInRes = false;
+			std::string fam = addId.substr(0, addId.find('_'));
+			status_message_ = "Added model family '" + fam + "' (+textures) to .res/.dat/.mtp.";
+		} else if (level_res_models_.Contains(obj.modelId)) {
+			// Import failed but the model is genuinely present in the destination
+			// (native entry): fall back to the plain reference change like other
+			// failure paths, instead of flagging the model as missing.
+			obj.modelMissingInRes = false;
+			status_message_ = "Could not refresh '" + addId + "' in .res; kept existing entry (see log).";
+		} else {
+			status_message_ = "Failed to add '" + addId + "' to level .res (see log).";
 		}
 
 		// Eagerly load the (possibly new) model now, with a progress overlay, so a heavy
