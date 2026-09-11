@@ -34,6 +34,17 @@ wrong level-local mesh or texture bundle. Two concrete defects:
    the model to the wrong level's archive. Existing RES entries also were not
    replaced when their bytes differed.
 
+3. Import skip on natively-present destinations: `CommitPropTextEdit` called
+   `ModelSourceRequiresImport` first, so committing a model field whose model
+   already exists in the destination inventory (e.g. `001_02_1` is native to
+   level 12) silently skipped the import — which is why levels 1/2/9 worked
+   while level 12 appeared to do nothing. An explicit Enter on the model field
+   is now always an import request; the staged replace path skips
+   byte-identical entries, so refreshing a natively-present model is a safe
+   no-op when bytes already match. If the import fails but the model exists
+   natively, the commit falls back to the reference change instead of flagging
+   the model as missing.
+
 ### Resolution
 
 - Track exact `(model ID, source level)` provenance through the picker and CLI.
@@ -77,6 +88,12 @@ wrong level-local mesh or texture bundle. Two concrete defects:
 - Disposable automatic-source negative control correctly rejected the divergent
   `001_02_1` bundle as ambiguous with no destination mutation; the installed
   `D:\IGI1` corpus was not modified during E2E.
+- Level 12 regression (import looked like a no-op): disposable-copy explicit
+  import of `001_02_1` (source level 2 → destination level 12) passed after the
+  always-import fix — `status=PASS`, exit 0, 0 texture mismatches, and
+  `destinationFilesChanged: []` (level 12's archives already carry
+  byte-identical content, so the safe refresh was a no-op)
+  (`D:\e2e-l12-alwaysimport2-artifacts\report.json`).
 
 ### Release gate still required
 
